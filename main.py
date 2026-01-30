@@ -1,7 +1,7 @@
 import os
 import time
 import uuid
-import re
+import re  # <--- این خط جا افتاده بود و باعث ارور میشد
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
@@ -156,7 +156,7 @@ async def callback_handler(event):
 async def stream_handler(unique_id, disposition):
     if links_col is None: return "DB Error", 500
     
-    # اطمینان از اتصال تلگرام قبل از دانلود
+    # اطمینان از اتصال تلگرام
     if not client.is_connected():
         try: await client.connect()
         except: pass
@@ -180,6 +180,7 @@ async def stream_handler(unique_id, disposition):
     start, end = 0, file_size - 1
     status = 200
 
+    # اینجا از re استفاده می‌شود که قبلاً باعث ارور می‌شد
     if range_header:
         match = re.search(r'bytes=(\d+)-(\d*)', range_header)
         if match:
@@ -187,7 +188,6 @@ async def stream_handler(unique_id, disposition):
             if match.group(2): end = int(match.group(2))
             status = 206
 
-    # تنظیم هدرهای صحیح برای ویدیو پلیرها
     headers = {
         'Content-Type': data['mime'],
         'Content-Disposition': f'{disposition}; filename="{data["filename"]}"',
@@ -197,7 +197,6 @@ async def stream_handler(unique_id, disposition):
     }
 
     async def file_generator():
-        # دانلود تکه به تکه از تلگرام و ارسال به کاربر
         async for chunk in client.iter_download(msg.media, offset=start, request_size=512*1024):
             yield chunk
 
@@ -209,5 +208,3 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
 async def home(): return "Streaming Bot Active 🚀"
-
-# نکته: app.run حذف شد چون Hypercorn این را هندل می‌کند
