@@ -6,6 +6,7 @@ import asyncio
 import aiohttp
 import certifi
 import glob
+import json
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
@@ -19,8 +20,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 
-# 🔑 کلید اختصاصی شما (از RapidAPI)
-# اگر در Render متغیر RAPID_API_KEY را نسازید، از این کلید پیش‌فرض استفاده می‌کند
+# 🔑 کلید RapidAPI شما
 RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "6ae492347amsh8ad1f4f1ac7ff53p172e9djsn08773036943b")
 
 ADMIN_ID = 98097025
@@ -119,114 +119,146 @@ async def start_handler(event):
         [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
         [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی DB", data="clear_all")]
     ]
-    await event.reply("👋 **ربات (نسخه RapidAPI) آماده است!**\nلینک بفرستید.", buttons=buttons)
+    await event.reply("👋 **ربات (نسخه RapidAPI Multi-Engine) آماده است!**\nلینک بفرستید.", buttons=buttons)
 
-# --- 🎥 دانلودر RapidAPI (YT API) ---
+# --- 🧠 توابع استخراج لینک از APIهای مختلف ---
+
+async def try_api_1(session, target_url):
+    # API 1: YouTube Quick Video Downloader
+    print("🔄 Testing API 1: Quick Video Downloader...")
+    url = "https://youtube-quick-video-downloader.p.rapidapi.com/api/youtube/links"
+    payload = {"url": target_url}
+    headers = {
+        "Content-Type": "application/json",
+        "x-rapidapi-host": "youtube-quick-video-downloader.p.rapidapi.com",
+        "x-rapidapi-key": RAPID_API_KEY
+    }
+    try:
+        async with session.post(url, json=payload, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # جستجو در پاسخ برای بهترین کیفیت
+                if isinstance(data, list): # گاهی لیست برمیگرداند
+                    for item in data:
+                        if item.get('quality') == '720p' or item.get('extension') == 'mp4':
+                            return item.get('url')
+                elif isinstance(data, dict):
+                     # ساختار احتمالی دیگر
+                     if 'all_formats' in data:
+                         for fmt in data['all_formats']:
+                             if fmt.get('quality') == '720p':
+                                 return fmt.get('url')
+    except Exception as e:
+        print(f"⚠️ API 1 Failed: {e}")
+    return None
+
+async def try_api_2(session, target_url):
+    # API 2: Snap Video 3
+    print("🔄 Testing API 2: Snap Video 3...")
+    url = "https://snap-video3.p.rapidapi.com/download"
+    # معمولا فرم دیتا میگیرند
+    payload = {"url": target_url}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-rapidapi-host": "snap-video3.p.rapidapi.com",
+        "x-rapidapi-key": RAPID_API_KEY
+    }
+    try:
+        async with session.post(url, data=payload, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # جستجوی لینک در پاسخ
+                if 'link' in data: return data['link']
+                if 'download_link' in data: return data['download_link']
+                if 'url' in data: return data['url']
+    except Exception as e:
+        print(f"⚠️ API 2 Failed: {e}")
+    return None
+
+async def try_api_3(session, target_url):
+    # API 3: YouTube Audio Video Download
+    print("🔄 Testing API 3: Audio Video Download...")
+    url = "https://youtube-audio-video-download.p.rapidapi.com/geturl"
+    querystring = {"video_url": target_url}
+    headers = {
+        "x-rapidapi-host": "youtube-audio-video-download.p.rapidapi.com",
+        "x-rapidapi-key": RAPID_API_KEY
+    }
+    try:
+        async with session.get(url, headers=headers, params=querystring, timeout=15) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # این API معمولا مستقیم url میدهد یا status
+                if 'url' in data: return data['url']
+                if 'download_url' in data: return data['download_url']
+    except Exception as e:
+        print(f"⚠️ API 3 Failed: {e}")
+    return None
+
+# --- 🎥 هندلر اصلی دانلود ---
 @client.on(events.NewMessage(pattern=r'(?s).*https?://.*'))
 async def url_handler(event):
     if event.sender_id != ADMIN_ID or not SETTINGS['is_active']: return
     if event.media and not isinstance(event.media, MessageMediaWebPage): return
 
-    # استخراج لینک
     found_links = re.findall(r'https?://[^\s]+', event.text)
     if not found_links: return
     target_url = found_links[0]
 
-    valid_domains = ['youtube', 'youtu.be']
+    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok']
     if not any(d in target_url for d in valid_domains): return
 
-    msg = await event.reply(f"🚀 **دریافت از RapidAPI (YT API)...**\n`{target_url}`")
+    msg = await event.reply(f"🚀 **در حال پردازش با چند موتور...**\n`{target_url}`")
     
     download_url = None
-    
-    # 1. استخراج ID ویدیو از لینک
-    video_id = None
-    if "youtu.be" in target_url:
-        video_id = target_url.split("/")[-1].split("?")[0]
-    elif "v=" in target_url:
-        video_id = target_url.split("v=")[1].split("&")[0]
-    elif "shorts" in target_url:
-        video_id = target_url.split("shorts/")[1].split("?")[0]
-        
-    if not video_id:
-        await msg.edit("❌ نتوانستم ID ویدیو را پیدا کنم.")
-        return
+    used_api = ""
 
-    # 2. تنظیمات درخواست API (طبق کدی که فرستادید)
-    api_url = "https://yt-api.p.rapidapi.com/dl"
-    querystring = {"id": video_id}
-    
-    headers = {
-        "x-rapidapi-key": RAPID_API_KEY,
-        "x-rapidapi-host": "yt-api.p.rapidapi.com"
-    }
+    async with aiohttp.ClientSession() as session:
+        # 1️⃣ تلاش اول
+        if not download_url:
+            download_url = await try_api_1(session, target_url)
+            if download_url: used_api = "QuickDownloader"
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, headers=headers, params=querystring) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    
-                    # 3. پیدا کردن بهترین لینک دانلود از پاسخ JSON
-                    # ساختار معمول این API: لیستی از فرمت‌ها برمی‌گرداند
-                    # ما دنبال اولین لینکی هستیم که ویدیو باشد
-                    
-                    # تلاش اول: جستجو در دیکشنری اصلی
-                    if 'link' in data:
-                         download_url = data['link']
-                    elif 'url' in data:
-                         download_url = data['url']
-                    # تلاش دوم: جستجو در لیست فرمت‌ها (formats/adaptiveFormats)
-                    elif 'formats' in data:
-                        for fmt in data['formats']:
-                            # اولویت با کیفیت 720 یا mp4 دارای صدا
-                            if fmt.get('url'):
-                                download_url = fmt['url']
-                                # اگر 720 پیدا شد، همینو بردار و برو
-                                if '720' in str(fmt.get('qualityLabel', '')):
-                                    break
-                    
-                    if not download_url:
-                         # چاپ ساختار برای دیباگ در لاگ Render اگر لینک پیدا نشد
-                        print(f"API Response Structure: {data}")
-                        
-                else:
-                    error_text = await resp.text()
-                    print(f"API Error: {resp.status} - {error_text}")
-                    await msg.edit(f"❌ خطای API: {resp.status}")
-                    return
+        # 2️⃣ تلاش دوم (اگر اولی نشد)
+        if not download_url:
+            download_url = await try_api_2(session, target_url)
+            if download_url: used_api = "SnapVideo"
+
+        # 3️⃣ تلاش سوم (اگر دومی نشد)
+        if not download_url:
+            download_url = await try_api_3(session, target_url)
+            if download_url: used_api = "AudioVideoDL"
 
         if not download_url:
-            await msg.edit("❌ لینک دانلود توسط API پیدا نشد.")
+            await msg.edit("❌ تمام APIها شکست خوردند. ممکن است لینک خراب باشد یا سهمیه API تمام شده باشد.")
             return
 
-        await msg.edit(f"📥 لینک استخراج شد!\nدر حال دانلود...")
+        await msg.edit(f"📥 لینک استخراج شد! ({used_api})\nدر حال دانلود به سرور...")
 
-        # 4. دانلود فایل نهایی
-        async with aiohttp.ClientSession() as session:
+        # دانلود فایل نهایی
+        try:
             async with session.get(download_url) as resp:
                 if resp.status == 200:
                     file_path = f"downloads/{uuid.uuid4()}.mp4"
                     with open(file_path, 'wb') as f:
                         f.write(await resp.read())
                     
-                    await msg.edit("📤 آپلود به تلگرام...")
+                    await msg.edit("📤 در حال آپلود...")
                     uploaded = await client.send_file(
                         ADMIN_ID, 
                         file_path, 
-                        caption=f"🎥 لینک اصلی: {target_url}\n✨ سرویس: YT API", 
+                        caption=f"🎥 لینک اصلی: {target_url}\n✨ موتور: {used_api}", 
                         supports_streaming=True
                     )
                     
                     if os.path.exists(file_path): os.remove(file_path)
                     await generate_link_for_message(uploaded, msg)
                 else:
-                    await msg.edit("❌ لینک مستقیم شد ولی فایل دانلود نشد (شاید لینک منقضی شده).")
-
-    except Exception as e:
-        await msg.edit(f"❌ خطا: {str(e)}")
-        if os.path.exists('downloads'):
-             for f in glob.glob('downloads/*'): os.remove(f)
+                    await msg.edit(f"❌ لینک مستقیم شد ولی دانلود نشد (Error {resp.status})")
+        except Exception as e:
+             await msg.edit(f"❌ خطا در دانلود نهایی: {str(e)}")
+             if os.path.exists('downloads'):
+                for f in glob.glob('downloads/*'): os.remove(f)
 
 # --- 📁 هندلر فایل ---
 @client.on(events.NewMessage(incoming=True))
