@@ -116,18 +116,21 @@ async def download_file(unique_id):
         'Content-Length': str(file_size)
     }
 
+# ... کدهای قبلی ...
+
     async def file_generator():
-        # استفاده از iter_download برای جلوگیری از پر شدن رم
         async for chunk in client.iter_download(msg.media):
             yield chunk
 
     return Response(file_generator(), headers=headers)
 
-# --- اجرای برنامه ---
+# 👇👇👇 کد جدید باید اینجا باشه (قبل از اجرای سرور) 👇👇👇
+@app.route('/')
+async def home():
+    return "Bot is running! 🚀"
+# 👆👆👆 --------------------------------------- 👆👆👆
+
+# --- اجرای برنامه (این باید حتماً آخر باشه) ---
 if __name__ == '__main__':
     PORT = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=PORT)
-
-@app.route('/')
-async def home():
-    return "Bot is running and happy! 🤖"
