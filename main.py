@@ -6,9 +6,9 @@ from telethon import TelegramClient, events
 from quart import Quart, request, Response
 
 # --- دریافت اطلاعات از Render ---
-API_ID = int(os.environ.get("343876"))
-API_HASH = os.environ.get("f066819b9fde48c2622bb53101f25caf")
-BOT_TOKEN = os.environ.get("180657140:AAGkIOYKg2iqoH7Ca142qFU1D2GwMt6IH10")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 98097025  # آیدی عددی شما ثابت است
 
 # اگر آدرس سایت هنوز مشخص نیست، پیش‌فرض لوکال‌هاست باشد
