@@ -11,7 +11,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 98097025
 
-# تنظیم آدرس سایت
+# آدرس سایت
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 
 # --- راه‌اندازی ---
@@ -22,9 +22,6 @@ links_db = {}
 
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
-    # لاگ کردن پیام برای دیباگ
-    print(f"New message from {event.sender_id}: {event.text or 'Media'}")
-
     if event.sender_id != ADMIN_ID:
         return
 
@@ -32,7 +29,7 @@ async def handle_file(event):
         await event.reply("❌ لطفاً فقط فایل ارسال کنید.")
         return
 
-# منوی انتخاب زمان (اصلاح شده)
+    # منوی انتخاب زمان
     buttons = [
         [Button.inline("⏱ 10 دقیقه", data=f"time_600_{event.id}"),
          Button.inline("⏱ 30 دقیقه", data=f"time_1800_{event.id}")],
@@ -44,7 +41,6 @@ async def handle_file(event):
         await event.reply("⏳ زمان انقضای لینک را انتخاب کنید:", buttons=buttons)
     except Exception as e:
         print(f"Error sending buttons: {e}")
-        await event.reply(f"Error: {str(e)}")
 
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
@@ -71,19 +67,17 @@ async def callback_handler(event):
             
             final_url = BASE_URL.rstrip('/') + f"/dl/{unique_id}"
             
-            # اصلاح دکمه حذف
             del_btn = [Button.inline("❌ حذف لینک", data=f"del_{unique_id}")]
             
             await event.edit(
                 f"✅ **لینک مستقیم آماده است!**\n\n"
-                f"📂 نام فایل: `{links_db[unique_id]['filename']}`\n"
+                f"📂 فایل: `{links_db[unique_id]['filename']}`\n"
                 f"⏳ اعتبار: {seconds//60} دقیقه\n\n"
                 f"🔗 لینک دانلود:\n`{final_url}`",
                 buttons=del_btn
             )
         except Exception as e:
-            print(f"Error in callback: {e}")
-            await event.reply(f"Error: {str(e)}")
+            print(f"Error: {e}")
 
     elif data.startswith("del_"):
         _, uid = data.split("_")
@@ -107,15 +101,17 @@ async def download_file(unique_id):
         
     msg = data['msg']
     file_name = data['filename']
+    file_size = msg.file.size
 
     headers = {
         'Content-Type': 'application/octet-stream',
         'Content-Disposition': f'attachment; filename="{file_name}"',
-        'Content-Length': str(msg.file.size)
+        'Content-Length': str(file_size)
     }
 
+    # بخش مهم: استفاده از iter_download برای جلوگیری از پر شدن رم
     async def file_generator():
-        async for chunk in client.download_file(msg.media, file=bytes):
+        async for chunk in client.iter_download(msg.media):
             yield chunk
 
     return Response(file_generator(), headers=headers)
