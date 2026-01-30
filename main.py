@@ -2,33 +2,28 @@ import os
 import time
 import uuid
 import re
-import mimetypes
+import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from quart import Quart, request, Response
 
-# --- تنظیمات اولیه ---
+# --- تنظیمات ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# ⚠️ آیدی عددی خودتان را اینجا وارد کنید ⚠️
+# ⚠️⚠️⚠️ آیدی عددی خودتان را اینجا جایگزین کنید ⚠️⚠️⚠️
+# اگر این عدد با آیدی تلگرام شما یکی نباشد، ربات جواب نمیدهد
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 links_db = {}
 
-# --- اتصال به تلگرام ---
+# --- اتصال ---
 if SESSION_STRING:
-    client = TelegramClient(
-        StringSession(SESSION_STRING), 
-        API_ID, 
-        API_HASH,
-        connection_retries=None,
-        auto_reconnect=True
-    )
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 else:
     client = TelegramClient('bot_session', API_ID, API_HASH)
 
@@ -36,7 +31,7 @@ app = Quart(__name__)
 
 @app.before_serving
 async def startup():
-    print("🤖 Bot starting...")
+    print("🤖 Bot Starting...")
     if not SESSION_STRING:
         await client.start(bot_token=BOT_TOKEN)
     else:
@@ -44,24 +39,38 @@ async def startup():
             await client.connect()
         except:
             await client.start(bot_token=BOT_TOKEN)
-    print("✅ Bot Connected!")
+    print(f"✅ Bot Connected! Listening for Admin ID: {ADMIN_ID}")
 
-# --- هندلر دریافت فایل ---
+# --- عیب‌یاب (Logger) ---
+# این بخش هر پیامی بیاید را در لاگ مینویسد تا بفهمیم مشکل کجاست
+@client.on(events.NewMessage(incoming=True))
+async def logger(event):
+    if event.sender_id == ADMIN_ID:
+        print(f"📩 پیام از ادمین دریافت شد: {event.text or 'File'}")
+    else:
+        print(f"⚠️ پیام از غریبه (ID: {event.sender_id}) نادیده گرفته شد.")
+
+# --- دستور استارت ---
+@client.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    if event.sender_id == ADMIN_ID:
+        await event.reply("👋 سلام! ربات آماده است. فایل بفرست.")
+    else:
+        # اگر آیدی اشتباه باشد این پیام می‌آید
+        await event.reply(f"⛔️ شما ادمین نیستید.\nآیدی شما: `{event.sender_id}`\nآیدی تنظیم شده در ربات: `{ADMIN_ID}`")
+
+# --- دریافت فایل ---
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
     if event.sender_id != ADMIN_ID: return
     if event.text and event.text.startswith('/'): return
     if not event.media: return
-    if not SETTINGS['is_active']:
-        await event.reply("❌ ربات غیرفعال است.")
-        return
 
     try:
-        msg = await event.reply("🚀 پردازش...")
+        msg = await event.reply("🔄 در حال پردازش...")
         unique_id = str(uuid.uuid4())[:8]
         expire_time = time.time() + SETTINGS['expire_time']
         
-        # تشخیص دقیق نام و نوع فایل
         file_name = "file"
         mime_type = "application/octet-stream"
         
@@ -75,7 +84,6 @@ async def handle_file(event):
              file_name = f"photo_{unique_id}.jpg"
              mime_type = "image/jpeg"
 
-        # تشخیص نوع محتوا برای متن پیام
         can_stream = False
         if 'video' in mime_type or 'audio' in mime_type:
             can_stream = True
@@ -91,101 +99,66 @@ async def handle_file(event):
         dl_url = f"{BASE_URL}/dl/{unique_id}"
         stream_url = f"{BASE_URL}/stream/{unique_id}"
         
-        txt = (f"✅ **فایل آماده شد**\n📄 نام: `{file_name}`\n📦 حجم: {event.message.file.size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
-        
+        txt = (f"✅ **لینک آماده شد!**\n📄 `{file_name}`\n\n📥 **دانلود:**\n`{dl_url}`")
         if can_stream:
             txt += f"\n\n▶️ **پخش آنلاین:**\n`{stream_url}`"
             
         await msg.edit(txt, buttons=[[Button.inline("❌ حذف", data=f"del_{unique_id}")]])
+        print(f"✅ Link created for {unique_id}")
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
 
-# --- هندلر دستورات ادمین ---
-@client.on(events.NewMessage(pattern='/admin'))
-async def admin_panel(event):
-    if event.sender_id != ADMIN_ID: return
-    buttons = [
-        [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
-        [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی", data="clear_all")]
-    ]
-    await event.reply("مدیریت:", buttons=buttons)
-
+# --- هندلر دکمه‌ها ---
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
     data = event.data.decode('utf-8')
-    
-    if data == "toggle_active":
-        SETTINGS['is_active'] = not SETTINGS['is_active']
-        await event.answer("انجام شد")
-        await admin_panel(event)
-    elif data == "clear_all":
-        links_db.clear()
-        await event.answer("پاک شد")
-    elif data.startswith("set_time_"):
-        SETTINGS['expire_time'] = int(data.split("_")[2])
-        await event.answer("زمان تنظیم شد")
-    elif data.startswith("del_"):
+    if data.startswith("del_"):
         uid = data.split("_")[1]
         if uid in links_db: del links_db[uid]
-        await event.edit("حذف شد.")
+        await event.edit("🗑 حذف شد.")
 
-# --- موتور استریم هوشمند (Smart Streaming) ---
+# --- استریم ---
 async def stream_handler(unique_id, disposition):
     data = links_db.get(unique_id)
-    if not data or time.time() > data['expire']:
-        return "Link Expired", 404
+    if not data or time.time() > data['expire']: return "Link Expired", 404
 
     msg = data['msg']
     file_size = data['size']
-    content_type = data['mime']
-    
-    # خواندن هدر Range (درخواست مرورگر برای جلو/عقب کردن)
     range_header = request.headers.get('Range')
     
-    start_byte = 0
-    end_byte = file_size - 1
-    status_code = 200
+    start, end = 0, file_size - 1
+    status = 200
 
-    # اگر مرورگر درخواست تکه‌ای از فایل را داشت
     if range_header:
         match = re.search(r'bytes=(\d+)-(\d*)', range_header)
         if match:
-            start_byte = int(match.group(1))
-            if match.group(2):
-                end_byte = int(match.group(2))
-            status_code = 206 # Partial Content
+            start = int(match.group(1))
+            if match.group(2): end = int(match.group(2))
+            status = 206
 
-    # محاسبه حجم دیتایی که باید فرستاده شود
-    content_length = end_byte - start_byte + 1
-    
     headers = {
-        'Content-Type': content_type,
+        'Content-Type': data['mime'],
         'Content-Disposition': f'{disposition}; filename="{data["filename"]}"',
         'Accept-Ranges': 'bytes',
-        'Content-Range': f'bytes {start_byte}-{end_byte}/{file_size}',
-        'Content-Length': str(content_length)
+        'Content-Range': f'bytes {start}-{end}/{file_size}',
+        'Content-Length': str(end - start + 1)
     }
 
     async def file_generator():
-        # دستور جادویی: دانلود از تلگرام دقیقاً از همان جایی که مرورگر خواسته
-        # offset=start_byte یعنی از وسط فایل شروع کن
-        async for chunk in client.iter_download(msg.media, offset=start_byte, request_size=512*1024):
-            # اگر بیشتر از حد نیاز مرورگر خواندیم، قطع کن
-            # (اینجا ساده‌سازی شده تا استریم قطع نشود)
+        # کاهش حجم بافر برای جلوگیری از قفل شدن ربات هنگام استریم
+        async for chunk in client.iter_download(msg.media, offset=start, request_size=128*1024):
             yield chunk
 
-    return Response(file_generator(), status=status_code, headers=headers)
+    return Response(file_generator(), status=status, headers=headers)
 
 @app.route('/dl/<unique_id>')
 async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
-
 @app.route('/stream/<unique_id>')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
-
 @app.route('/')
-async def home(): return "Bot is Running! 🚀"
+async def home(): return "Bot is Alive!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
