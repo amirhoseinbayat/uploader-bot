@@ -5,6 +5,7 @@ import re
 import asyncio
 import aiohttp
 import certifi
+import glob
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
@@ -18,10 +19,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 
-# 🔑 کلید جدید را در Render با نام RAPID_API_KEY ذخیره کنید
-RAPID_API_KEY = os.environ.get("RAPID_API_KEY") 
+# 🔑 کلید اختصاصی شما (از RapidAPI)
+# اگر در Render متغیر RAPID_API_KEY را نسازید، از این کلید پیش‌فرض استفاده می‌کند
+RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "6ae492347amsh8ad1f4f1ac7ff53p172e9djsn08773036943b")
 
-ADMIN_ID = 98097025  
+ADMIN_ID = 98097025
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
@@ -119,40 +121,39 @@ async def start_handler(event):
     ]
     await event.reply("👋 **ربات (نسخه RapidAPI) آماده است!**\nلینک بفرستید.", buttons=buttons)
 
-# --- 🎥 دانلودر RapidAPI (نسخه yt-api) ---
+# --- 🎥 دانلودر RapidAPI (YT API) ---
 @client.on(events.NewMessage(pattern=r'(?s).*https?://.*'))
 async def url_handler(event):
     if event.sender_id != ADMIN_ID or not SETTINGS['is_active']: return
     if event.media and not isinstance(event.media, MessageMediaWebPage): return
 
+    # استخراج لینک
     found_links = re.findall(r'https?://[^\s]+', event.text)
     if not found_links: return
     target_url = found_links[0]
 
-    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok']
+    valid_domains = ['youtube', 'youtu.be']
     if not any(d in target_url for d in valid_domains): return
 
-    if not RAPID_API_KEY:
-        await event.reply("❌ **خطا:** کلید `RAPID_API_KEY` در Render تنظیم نشده است!")
-        return
-
-    msg = await event.reply(f"🚀 **دریافت از RapidAPI...**\n`{target_url}`")
+    msg = await event.reply(f"🚀 **دریافت از RapidAPI (YT API)...**\n`{target_url}`")
     
     download_url = None
     
-    # تنظیمات برای yt-api.p.rapidapi.com
-    # این سرویس معمولاً از اندپوینت /dl استفاده می‌کند
-    api_url = "https://yt-api.p.rapidapi.com/dl"
-    
-    # استخراج ID ویدیو از لینک
-    video_id = target_url
-    if "v=" in target_url:
+    # 1. استخراج ID ویدیو از لینک
+    video_id = None
+    if "youtu.be" in target_url:
+        video_id = target_url.split("/")[-1].split("?")[0]
+    elif "v=" in target_url:
         video_id = target_url.split("v=")[1].split("&")[0]
-    elif "youtu.be/" in target_url:
-        video_id = target_url.split("youtu.be/")[1].split("?")[0]
-    elif "shorts/" in target_url:
+    elif "shorts" in target_url:
         video_id = target_url.split("shorts/")[1].split("?")[0]
+        
+    if not video_id:
+        await msg.edit("❌ نتوانستم ID ویدیو را پیدا کنم.")
+        return
 
+    # 2. تنظیمات درخواست API (طبق کدی که فرستادید)
+    api_url = "https://yt-api.p.rapidapi.com/dl"
     querystring = {"id": video_id}
     
     headers = {
@@ -165,37 +166,43 @@ async def url_handler(event):
             async with session.get(api_url, headers=headers, params=querystring) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # تلاش برای پیدا کردن لینک در پاسخ JSON
-                    # ساختار پاسخ ممکن است بسته به نسخه API متفاوت باشد
-                    if 'url' in data:
-                        download_url = data['url']
-                    elif 'link' in data:
-                        download_url = data['link']
-                    elif 'formats' in data and len(data['formats']) > 0:
-                        download_url = data['formats'][0]['url']
-                    elif 'adaptiveFormats' in data and len(data['adaptiveFormats']) > 0:
-                        download_url = data['adaptiveFormats'][0]['url']
-                    elif 'links' in data and len(data['links']) > 0:
-                         # برخی سرویس‌ها لیست می‌دهند
-                         download_url = data['links']['mp4']['auto']['link'] if 'mp4' in data['links'] else None
-                         
+                    
+                    # 3. پیدا کردن بهترین لینک دانلود از پاسخ JSON
+                    # ساختار معمول این API: لیستی از فرمت‌ها برمی‌گرداند
+                    # ما دنبال اولین لینکی هستیم که ویدیو باشد
+                    
+                    # تلاش اول: جستجو در دیکشنری اصلی
+                    if 'link' in data:
+                         download_url = data['link']
+                    elif 'url' in data:
+                         download_url = data['url']
+                    # تلاش دوم: جستجو در لیست فرمت‌ها (formats/adaptiveFormats)
+                    elif 'formats' in data:
+                        for fmt in data['formats']:
+                            # اولویت با کیفیت 720 یا mp4 دارای صدا
+                            if fmt.get('url'):
+                                download_url = fmt['url']
+                                # اگر 720 پیدا شد، همینو بردار و برو
+                                if '720' in str(fmt.get('qualityLabel', '')):
+                                    break
+                    
+                    if not download_url:
+                         # چاپ ساختار برای دیباگ در لاگ Render اگر لینک پیدا نشد
+                        print(f"API Response Structure: {data}")
+                        
                 else:
-                    err_text = await resp.text()
-                    print(f"RapidAPI Error ({resp.status}): {err_text}")
-                    # اگر اندپوینت /dl کار نکرد، یک بار دیگر با /video تلاش می‌کنیم (بعضی سرویس‌ها اینطوری هستند)
-                    if resp.status == 404:
-                         async with session.get("https://yt-api.p.rapidapi.com/video", headers=headers, params=querystring) as resp2:
-                             if resp2.status == 200:
-                                 data2 = await resp2.json()
-                                 if 'url' in data2: download_url = data2['url']
+                    error_text = await resp.text()
+                    print(f"API Error: {resp.status} - {error_text}")
+                    await msg.edit(f"❌ خطای API: {resp.status}")
+                    return
 
         if not download_url:
-            await msg.edit("❌ لینک دانلود دریافت نشد.\n(ممکن است سهمیه API تمام شده باشد یا ویدیو محدود باشد)")
+            await msg.edit("❌ لینک دانلود توسط API پیدا نشد.")
             return
 
-        await msg.edit(f"📥 لینک مستقیم شد!\nدر حال دانلود به سرور...")
+        await msg.edit(f"📥 لینک استخراج شد!\nدر حال دانلود...")
 
-        # دانلود فایل نهایی
+        # 4. دانلود فایل نهایی
         async with aiohttp.ClientSession() as session:
             async with session.get(download_url) as resp:
                 if resp.status == 200:
@@ -207,14 +214,14 @@ async def url_handler(event):
                     uploaded = await client.send_file(
                         ADMIN_ID, 
                         file_path, 
-                        caption=f"🎥 لینک اصلی: {target_url}\n✨ سرویس: yt-api", 
+                        caption=f"🎥 لینک اصلی: {target_url}\n✨ سرویس: YT API", 
                         supports_streaming=True
                     )
                     
                     if os.path.exists(file_path): os.remove(file_path)
                     await generate_link_for_message(uploaded, msg)
                 else:
-                    await msg.edit("❌ لینک دانلود معتبر بود اما فایل دانلود نشد.")
+                    await msg.edit("❌ لینک مستقیم شد ولی فایل دانلود نشد (شاید لینک منقضی شده).")
 
     except Exception as e:
         await msg.edit(f"❌ خطا: {str(e)}")
