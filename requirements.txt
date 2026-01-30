@@ -1,3 +1,4 @@
 Telethon
 Quart
 hypercorn
+yt-dlp
