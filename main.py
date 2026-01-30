@@ -32,7 +32,7 @@ async def handle_file(event):
         await event.reply("❌ لطفاً فقط فایل ارسال کنید.")
         return
 
-    # منوی انتخاب زمان (اصلاح شده)
+# منوی انتخاب زمان (اصلاح شده)
     buttons = [
         [Button.inline("⏱ 10 دقیقه", data=f"time_600_{event.id}"),
          Button.inline("⏱ 30 دقیقه", data=f"time_1800_{event.id}")],
