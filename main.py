@@ -77,7 +77,10 @@ async def admin_panel(event):
 # --- دریافت فایل (اصلاح شده) ---
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
-    # فقط به ادمین جواب بده
+    # 👇👇👇 این خط جدید رو اضافه کن 👇👇👇
+    print(f"📩 پیام جدید از طرف: {event.sender_id}") 
+    
+    # ... بقیه کدها ...
     if event.sender_id != ADMIN_ID:
         return
 
