@@ -3,7 +3,6 @@ import time
 import uuid
 import re
 import asyncio
-# اضافه کردن کتابخانه امنیتی
 import certifi 
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
@@ -24,7 +23,7 @@ ADMIN_ID = 98097025
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
-# --- اتصال به دیتابیس (با فیکس SSL) ---
+# --- اتصال به دیتابیس (نسخه ضد ضربه SSL) ---
 mongo_client = None
 links_col = None
 
@@ -32,12 +31,16 @@ if not MONGO_URL:
     print("❌ خطا: MONGO_URL تنظیم نشده است!")
 else:
     try:
-        # 🟢 فیکس اصلی: استفاده از certifi برای حل مشکل SSL Handshake
-        mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
+        # 🟢 تغییر مهم: غیرفعال کردن سخت‌گیری SSL برای اتصال تضمینی
+        mongo_client = AsyncIOMotorClient(
+            MONGO_URL, 
+            tls=True,
+            tlsAllowInvalidCertificates=True  # این خط مشکل هندشیک را حل می‌کند
+        )
         db = mongo_client['uploader_bot']
         links_col = db['links']
     except Exception as e:
-        print(f"❌ خطا در اتصال به مونگو: {e}")
+        print(f"❌ خطا در تعریف کلاینت مونگو: {e}")
 
 # --- اتصال به تلگرام ---
 if SESSION_STRING:
@@ -56,20 +59,23 @@ async def startup():
         try: await client.connect()
         except: await client.start(bot_token=BOT_TOKEN)
     
-    if mongo_client is not None:
+    # تست اتصال واقعی به دیتابیس
+    if mongo_client:
         try:
-            # تست اتصال واقعی برای اطمینان از رفع ارور SSL
+            # یک پینگ واقعی می‌فرستیم تا مطمئن شویم وصل شده
             await mongo_client.admin.command('ping')
-            print(f"✅ Bot Connected! MongoDB SSL Handshake: Successful 🍃")
+            print(f"✅ Bot Connected! MongoDB Status: 🟢 Connected (SSL Bypassed)")
         except Exception as e:
-            print(f"❌ MongoDB Connection Failed: {e}")
+            print(f"❌ MongoDB Error: {e}")
+            # اگر باز هم وصل نشد، لاگ کامل بدهد
     else:
-        print(f"⚠️ Bot Connected but MongoDB URL is MISSING!")
+        print(f"⚠️ MongoDB URL Missing!")
 
 # --- تابع کمکی: ساخت لینک ---
 async def generate_link_for_message(message, reply_to_msg):
+    # چک کردن وضعیت دیتابیس قبل از ذخیره
     if links_col is None:
-        await reply_to_msg.edit("❌ خطای دیتابیس: اتصال برقرار نشد.")
+        await reply_to_msg.edit("❌ دیتابیس وصل نیست. لطفاً لاگ‌ها را چک کنید.")
         return
 
     try:
@@ -104,20 +110,22 @@ async def generate_link_for_message(message, reply_to_msg):
             'mime': mime_type,
             'size': file_size
         }
+        
+        # ذخیره در دیتابیس
         await links_col.insert_one(link_data)
         
         dl_url = f"{BASE_URL}/dl/{unique_id}"
         stream_url = f"{BASE_URL}/stream/{unique_id}"
         
-        txt = (f"✅ **لینک ابدی شد!** (MongoDB)\n📄 `{file_name}`\n📦 حجم: {file_size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
+        txt = (f"✅ **لینک ابدی شد!** (Database)\n📄 `{file_name}`\n📦 حجم: {file_size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
         if can_stream:
             txt += f"\n\n▶️ **پخش آنلاین:**\n`{stream_url}`"
             
-        await reply_to_msg.edit(txt, buttons=[[Button.inline("❌ حذف از دیتابیس", data=f"del_{unique_id}")]])
+        await reply_to_msg.edit(txt, buttons=[[Button.inline("❌ حذف", data=f"del_{unique_id}")]])
         
     except Exception as e:
-        print(f"Error: {e}")
-        await reply_to_msg.edit(f"❌ خطا: {e}")
+        print(f"Error saving to DB: {e}")
+        await reply_to_msg.edit(f"❌ خطا در ذخیره: {e}")
 
 # --- هندلر استارت ---
 @client.on(events.NewMessage(pattern='/start'))
@@ -127,8 +135,8 @@ async def start_handler(event):
             [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
             [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 فرمت دیتابیس", data="clear_all")]
         ]
-        status_msg = "سیستم به دیتابیس MongoDB متصل است 🍃" if mongo_client is not None else "❌ دیتابیس وصل نیست!"
-        await event.reply(f"👋 **سلام قربان!**\n{status_msg}\nفایل بفرستید.", buttons=buttons)
+        status = "🟢 دیتابیس متصل است" if mongo_client else "🔴 دیتابیس قطع است"
+        await event.reply(f"👋 **سلام قربان!**\n{status}\nفایل بفرستید.", buttons=buttons)
 
 # --- هندلر دریافت فایل ---
 @client.on(events.NewMessage(incoming=True))
@@ -154,15 +162,15 @@ async def callback_handler(event):
     elif data == "clear_all":
         if links_col is not None:
             await links_col.delete_many({})
-            await event.answer("دیتابیس کامل پاکسازی شد!", alert=True)
+            await event.answer("دیتابیس پاکسازی شد!", alert=True)
         else:
-            await event.answer("دیتابیس وصل نیست!")
+            await event.answer("دیتابیس وصل نیست")
         
     elif data.startswith("del_"):
         uid = data.split("_")[1]
         if links_col is not None:
             await links_col.delete_one({'unique_id': uid})
-            await event.edit("🗑 از دیتابیس حذف شد.")
+            await event.edit("🗑 حذف شد.")
             
     elif data.startswith("set_time_"):
         SETTINGS['expire_time'] = int(data.split("_")[2])
@@ -170,13 +178,12 @@ async def callback_handler(event):
 
 # --- استریم و دانلود ---
 async def stream_handler(unique_id, disposition):
-    if links_col is None:
-        return "Database Error: Not Connected", 500
+    if links_col is None: return "Database Error", 500
 
     data = await links_col.find_one({'unique_id': unique_id})
     
     if not data:
-        return "❌ Link Not Found (Deleted from DB)", 404
+        return "❌ Link Not Found", 404
     
     if time.time() > data['expire']:
         await links_col.delete_one({'unique_id': unique_id})
@@ -220,7 +227,7 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 @app.route('/stream/<unique_id>')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
-async def home(): return "Bot + MongoDB Active 🍃"
+async def home(): return "Bot Active 🍃"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
