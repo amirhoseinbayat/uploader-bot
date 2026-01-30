@@ -20,25 +20,19 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 
-# آیدی ادمین (ست شده برای شما)
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
-# --- لیست طلایی سرورهای Cobalt (آپدیت 2025) ---
-# ترکیبی از سرورهای اصلی و کامیونیتی برای تضمین دانلود
+# --- لیست سرورهای زنده (تست شده) ---
+# سرورهای arms و oxno زنده هستند ولی نیاز به ssl=False دارند
 COBALT_INSTANCES = [
-    "https://api.cobalt.tools",          # سرور اصلی (گاهی شلوغ)
-    "https://cobalt.kwiatekmiki.pl",     # بسیار پایدار
-    "https://cobalt.arms.da.ru",         # سرور روسیه (عالی برای دور زدن تحریم)
-    "https://api.oxno.de",               # سرور آلمان
-    "https://cobalt.154.gq",             # سرور عمومی قوی
-    "https://cobalt.xy24.eu.org",        # سرور اروپا
-    "https://cobalt.slpy.one",           # سرور جایگزین
-    "https://cobalt.jimmyjo.eu",         # سرور جایگزین 2
-    "https://cobalt.nao.lgbt",           # سرور آمریکا
-    "https://cobalt.furtidev.me",        # سرور آسیا
+    "https://api.cobalt.tools",          # اصلی (پایدارترین)
+    "https://cobalt.arms.da.ru",         # روسیه (عالی)
+    "https://api.oxno.de",               # آلمان
+    "https://cobalt.rudart.cn",          # چین (جدید)
+    "https://cobalt.q114514.top",        # جایگزین
 ]
 
 # --- 🍃 اتصال به دیتابیس ---
@@ -47,6 +41,7 @@ links_col = None
 
 if MONGO_URL:
     try:
+        # اتصال به دیتابیس با نادیده گرفتن SSL
         mongo_client = AsyncIOMotorClient(MONGO_URL, tls=True, tlsAllowInvalidCertificates=True)
         db = mongo_client['uploader_bot']
         links_col = db['links']
@@ -134,13 +129,12 @@ async def start_handler(event):
     ]
     await event.reply("👋 **ربات آماده است!**\nلینک یوتیوب/اینستاگرام یا فایل بفرستید.", buttons=buttons)
 
-# --- 🎥 دانلودر هوشمند (Mega Server List) ---
+# --- 🎥 دانلودر هوشمند (FIXED SSL) ---
 @client.on(events.NewMessage(pattern=r'(?s).*https?://.*'))
 async def url_handler(event):
     if event.sender_id != ADMIN_ID or not SETTINGS['is_active']: return
     if event.media and not isinstance(event.media, MessageMediaWebPage): return
 
-    # استخراج لینک
     found_links = re.findall(r'https?://[^\s]+', event.text)
     if not found_links: return
     target_url = found_links[0]
@@ -148,22 +142,21 @@ async def url_handler(event):
     valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok', 'twitter', 'x.com', 'soundcloud', 'twitch']
     if not any(d in target_url for d in valid_domains): return
 
-    msg = await event.reply(f"🚀 **درحال جستجوی سرور خلوت...**\n`{target_url}`")
+    msg = await event.reply(f"🚀 **اتصال به سرورهای دانلود...**\n`{target_url}`")
     
     download_url = None
     working_server = ""
-    
-    # شافل کردن لیست سرورها برای توزیع بار (شانسی انتخاب میکنه که همزمان روی یک سرور فشار نیاد)
     server_list = COBALT_INSTANCES.copy()
     random.shuffle(server_list)
 
-    async with aiohttp.ClientSession() as session:
+    # اتصال بدون بررسی SSL (برای حل مشکل سرورهای رایگان)
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
         for api_base in server_list:
             try:
                 headers = {
                     "Accept": "application/json",
                     "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                 }
                 payload = {
                     "url": target_url,
@@ -172,8 +165,7 @@ async def url_handler(event):
                     "isAudioOnly": False
                 }
                 
-                # تایم‌اوت کوتاه (۵ ثانیه) برای اینکه اگر سروری کند بود سریع ردش کنه
-                async with session.post(f"{api_base}/api/json", json=payload, headers=headers, timeout=6) as resp:
+                async with session.post(f"{api_base}/api/json", json=payload, headers=headers, timeout=8) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         status = data.get('status')
@@ -187,40 +179,43 @@ async def url_handler(event):
                             working_server = api_base
                             print(f"✅ Connected to: {api_base}")
                             break
+                    else:
+                        print(f"⚠️ {api_base} returned {resp.status}")
+
             except Exception as e:
-                print(f"⚠️ Server {api_base} failed: {e}")
+                print(f"⚠️ {api_base} Error: {e}")
                 continue
 
-    if not download_url:
-        await msg.edit("❌ تمام سرورهای کمکی در حال حاضر شلوغ یا فیلتر هستند.\nلطفاً ۵ دقیقه دیگر تلاش کنید یا لینک دیگری بفرستید.")
-        return
+        if not download_url:
+            await msg.edit("❌ سرورها پاسخ ندادند. (مشکل SSL یا شلوغی شبکه)\nلطفاً لینک دیگری را تست کنید.")
+            return
 
-    await msg.edit(f"📥 سرور پیدا شد ({working_server.split('//')[1]})\nدر حال دانلود...")
+        await msg.edit(f"📥 دانلود از: {working_server.split('//')[1]}\nدر حال انتقال...")
 
-    try:
-        async with aiohttp.ClientSession() as session:
+        try:
+            # دانلود فایل نهایی (باز هم بدون SSL برای اطمینان)
             async with session.get(download_url) as resp:
                 if resp.status == 200:
                     file_path = f"downloads/{uuid.uuid4()}.mp4"
                     with open(file_path, 'wb') as f:
                         f.write(await resp.read())
                     
-                    await msg.edit("📤 در حال آپلود به تلگرام...")
+                    await msg.edit("📤 آپلود به تلگرام...")
                     uploaded = await client.send_file(
                         ADMIN_ID, 
                         file_path, 
-                        caption=f"🎥 لینک اصلی: {target_url}\n⚡️ سرور: {working_server}", 
+                        caption=f"🎥 لینک: {target_url}\n⚡️ سرور: {working_server}", 
                         supports_streaming=True
                     )
                     
                     if os.path.exists(file_path): os.remove(file_path)
                     await generate_link_for_message(uploaded, msg)
                 else:
-                    await msg.edit("❌ لینک دانلود ساخته شد اما دانلود فایل شکست خورد.")
-    except Exception as e:
-        await msg.edit(f"❌ خطای نهایی: {str(e)}")
-        if os.path.exists('downloads'):
-            for f in glob.glob('downloads/*'): os.remove(f)
+                    await msg.edit("❌ لینک گرفته شد ولی فایل دانلود نشد.")
+        except Exception as e:
+            await msg.edit(f"❌ خطای نهایی: {str(e)}")
+            if os.path.exists('downloads'):
+                for f in glob.glob('downloads/*'): os.remove(f)
 
 # --- 📁 هندلر فایل ---
 @client.on(events.NewMessage(incoming=True))
