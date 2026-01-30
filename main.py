@@ -5,22 +5,34 @@ import re
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
+from telethon.tl.types import MessageMediaWebPage
 from quart import Quart, request, Response
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # --- تنظیمات ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
+MONGO_URL = os.environ.get("MONGO_URL")
 
-# ⚠️ آیدی عددی خودتان (حتما چک کنید درست باشد)
+# ⚠️ آیدی عددی خودتان را اینجا وارد کنید
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
-links_db = {}
 
-# --- اتصال ---
+# --- اتصال به دیتابیس ---
+if not MONGO_URL:
+    print("❌ خطا: MONGO_URL تنظیم نشده است!")
+    exit(1)
+
+# کلاینت دیتابیس
+mongo_client = AsyncIOMotorClient(MONGO_URL)
+db = mongo_client['uploader_bot']
+links_col = db['links']  # ذخیره لینک‌ها در دیتابیس
+
+# --- اتصال به تلگرام ---
 if SESSION_STRING:
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 else:
@@ -34,87 +46,80 @@ async def startup():
     if not SESSION_STRING:
         await client.start(bot_token=BOT_TOKEN)
     else:
-        try:
-            await client.connect()
-        except:
-            await client.start(bot_token=BOT_TOKEN)
-    print(f"✅ Bot Connected! Listening for Admin ID: {ADMIN_ID}")
+        try: await client.connect()
+        except: await client.start(bot_token=BOT_TOKEN)
+    print(f"✅ Bot Connected! MongoDB Status: Connected 🍃")
 
-# --- دستور استارت (همراه با دکمه‌های مدیریت) ---
-@client.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    if event.sender_id == ADMIN_ID:
-        # دکمه‌های پنل مدیریت همینجا تعریف می‌شوند
-        buttons = [
-            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌ غیرفعال'}", data="toggle_active")],
-            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("⏱ 2 ساعت", data="set_time_7200")],
-            [Button.inline("🗑 حذف همه لینک‌ها", data="clear_all")]
-        ]
-        await event.reply(
-            "👋 **سلام قربان!**\n\n"
-            "🟢 ربات آماده دریافت فایل است.\n"
-            "⚙️ **پنل دسترسی سریع:**", 
-            buttons=buttons
-        )
-    else:
-        await event.reply("⛔️ شما دسترسی ندارید.")
-
-# --- دستور پنل (اختیاری) ---
-@client.on(events.NewMessage(pattern='/admin'))
-async def admin_panel(event):
-    if event.sender_id == ADMIN_ID:
-        # فراخوانی همان دکمه‌ها
-        await start_handler(event)
-
-# --- دریافت فایل ---
-@client.on(events.NewMessage(incoming=True))
-async def handle_file(event):
-    if event.sender_id != ADMIN_ID: return
-    if event.text and event.text.startswith('/'): return
-    if not event.media: return
-
+# --- تابع کمکی: ساخت لینک ---
+async def generate_link_for_message(message, reply_to_msg):
     try:
-        msg = await event.reply("🔄 ...")
         unique_id = str(uuid.uuid4())[:8]
         expire_time = time.time() + SETTINGS['expire_time']
         
         file_name = "file"
         mime_type = "application/octet-stream"
+        file_size = 0
         
-        if hasattr(event.media, 'document'):
-            mime_type = event.media.document.mime_type
-            for attr in event.media.document.attributes:
-                if hasattr(attr, 'file_name'):
-                    file_name = attr.file_name
-                    break
-        elif hasattr(event.media, 'photo'):
-             file_name = f"photo_{unique_id}.jpg"
-             mime_type = "image/jpeg"
+        if hasattr(message, 'file') and message.file:
+            if message.file.name:
+                file_name = message.file.name
+            else:
+                ext = message.file.ext or ""
+                file_name = f"downloaded_file{ext}"
+            mime_type = message.file.mime_type
+            file_size = message.file.size
+        else:
+            return
 
         can_stream = False
         if 'video' in mime_type or 'audio' in mime_type:
             can_stream = True
 
-        links_db[unique_id] = {
-            'msg': event.message,
+        # ذخیره اطلاعات در MongoDB
+        link_data = {
+            'unique_id': unique_id,
+            'chat_id': message.chat_id,
+            'msg_id': message.id,
             'expire': expire_time,
             'filename': file_name,
             'mime': mime_type,
-            'size': event.message.file.size
+            'size': file_size
         }
+        await links_col.insert_one(link_data)
         
         dl_url = f"{BASE_URL}/dl/{unique_id}"
         stream_url = f"{BASE_URL}/stream/{unique_id}"
         
-        txt = (f"✅ **لینک آماده شد!**\n📄 `{file_name}`\n\n📥 **دانلود:**\n`{dl_url}`")
+        txt = (f"✅ **لینک ابدی شد!** (ذخیره در دیتابیس)\n📄 `{file_name}`\n📦 حجم: {file_size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
         if can_stream:
             txt += f"\n\n▶️ **پخش آنلاین:**\n`{stream_url}`"
             
-        await msg.edit(txt, buttons=[[Button.inline("❌ حذف", data=f"del_{unique_id}")]])
-        print(f"✅ Link created for {unique_id}")
-
+        await reply_to_msg.edit(txt, buttons=[[Button.inline("❌ حذف از دیتابیس", data=f"del_{unique_id}")]])
+        
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
+        await reply_to_msg.edit(f"❌ خطا: {e}")
+
+# --- هندلر استارت ---
+@client.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    if event.sender_id == ADMIN_ID:
+        buttons = [
+            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
+            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 فرمت دیتابیس", data="clear_all")]
+        ]
+        await event.reply("👋 **سلام قربان!**\nسیستم به دیتابیس MongoDB متصل است 🍃.\nفایل بفرستید.", buttons=buttons)
+
+# --- هندلر دریافت فایل ---
+@client.on(events.NewMessage(incoming=True))
+async def handle_file(event):
+    if event.sender_id != ADMIN_ID: return
+    if event.text and event.text.startswith('/'): return
+    if isinstance(event.media, MessageMediaWebPage): return
+    if not event.media: return
+
+    msg = await event.reply("🍃 در حال ذخیره در دیتابیس...")
+    await generate_link_for_message(event.message, msg)
 
 # --- هندلر دکمه‌ها ---
 @client.on(events.CallbackQuery)
@@ -124,41 +129,42 @@ async def callback_handler(event):
     
     if data == "toggle_active":
         SETTINGS['is_active'] = not SETTINGS['is_active']
-        # به‌روزرسانی متن دکمه‌ها
-        buttons = [
-            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌ غیرفعال'}", data="toggle_active")],
-            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("⏱ 2 ساعت", data="set_time_7200")],
-            [Button.inline("🗑 حذف همه لینک‌ها", data="clear_all")]
-        ]
-        await event.edit(
-            "👋 **سلام قربان!**\n\n"
-            "🟢 ربات آماده دریافت فایل است.\n"
-            "⚙️ **پنل دسترسی سریع:**", 
-            buttons=buttons
-        )
-    
-    elif data == "clear_all":
-        links_db.clear()
-        await event.answer("🗑 حافظه پاک شد!", alert=True)
+        await event.answer("انجام شد")
         
-    elif data.startswith("set_time_"):
-        SETTINGS['expire_time'] = int(data.split("_")[2])
-        await event.answer(f"⏱ زمان روی {SETTINGS['expire_time']//3600} ساعت تنظیم شد.", alert=True)
+    elif data == "clear_all":
+        await links_col.delete_many({})
+        await event.answer("دیتابیس کامل پاکسازی شد!", alert=True)
         
     elif data.startswith("del_"):
         uid = data.split("_")[1]
-        if uid in links_db: del links_db[uid]
-        await event.edit("🗑 حذف شد.")
+        await links_col.delete_one({'unique_id': uid})
+        await event.edit("🗑 از دیتابیس حذف شد.")
+            
+    elif data.startswith("set_time_"):
+        SETTINGS['expire_time'] = int(data.split("_")[2])
+        await event.answer("زمان تنظیم شد")
 
-# --- استریم ---
+# --- استریم و دانلود (خواندن از MongoDB) ---
 async def stream_handler(unique_id, disposition):
-    data = links_db.get(unique_id)
-    if not data or time.time() > data['expire']: return "Link Expired", 404
+    # جستجو در دیتابیس به جای رم
+    data = await links_col.find_one({'unique_id': unique_id})
+    
+    if not data:
+        return "❌ Link Not Found (Deleted from DB)", 404
+    
+    if time.time() > data['expire']:
+        await links_col.delete_one({'unique_id': unique_id})
+        return "⏳ Link Expired", 403
 
-    msg = data['msg']
+    try:
+        msg = await client.get_messages(data['chat_id'], ids=data['msg_id'])
+        if not msg or not msg.media:
+            return "❌ File removed from Telegram", 404
+    except:
+        return "❌ Telegram Error", 500
+
     file_size = data['size']
     range_header = request.headers.get('Range')
-    
     start, end = 0, file_size - 1
     status = 200
 
@@ -188,7 +194,7 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 @app.route('/stream/<unique_id>')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
-async def home(): return "Bot is Alive!"
+async def home(): return "Bot + MongoDB Active 🍃"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
