@@ -3,6 +3,9 @@ import time
 import uuid
 import re
 import asyncio
+import glob
+# اضافه شدن کتابخانه yt-dlp
+import yt_dlp 
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from quart import Quart, request, Response
@@ -13,7 +16,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# ⚠️ آیدی عددی خودتان (حتما چک کنید درست باشد)
+# ⚠️ آیدی عددی خودتان را وارد کنید
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
@@ -34,46 +37,84 @@ async def startup():
     if not SESSION_STRING:
         await client.start(bot_token=BOT_TOKEN)
     else:
-        try:
-            await client.connect()
-        except:
-            await client.start(bot_token=BOT_TOKEN)
+        try: await client.connect()
+        except: await client.start(bot_token=BOT_TOKEN)
     print(f"✅ Bot Connected! Listening for Admin ID: {ADMIN_ID}")
 
-# --- دستور استارت (همراه با دکمه‌های مدیریت) ---
+# --- هندلر استارت ---
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if event.sender_id == ADMIN_ID:
-        # دکمه‌های پنل مدیریت همینجا تعریف می‌شوند
         buttons = [
-            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌ غیرفعال'}", data="toggle_active")],
-            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("⏱ 2 ساعت", data="set_time_7200")],
-            [Button.inline("🗑 حذف همه لینک‌ها", data="clear_all")]
+            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
+            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی", data="clear_all")]
         ]
         await event.reply(
             "👋 **سلام قربان!**\n\n"
-            "🟢 ربات آماده دریافت فایل است.\n"
-            "⚙️ **پنل دسترسی سریع:**", 
+            "1️⃣ فایل بفرستید -> لینک مستقیم بگیرید.\n"
+            "2️⃣ لینک یوتیوب بفرستید -> دانلود و تبدیل به لینک مستقیم.\n\n"
+            "⚙️ **تنظیمات:**", 
             buttons=buttons
         )
-    else:
-        await event.reply("⛔️ شما دسترسی ندارید.")
 
-# --- دستور پنل (اختیاری) ---
-@client.on(events.NewMessage(pattern='/admin'))
-async def admin_panel(event):
-    if event.sender_id == ADMIN_ID:
-        # فراخوانی همان دکمه‌ها
-        await start_handler(event)
+# --- هندلر دانلود از یوتیوب (جدید) ---
+@client.on(events.NewMessage(pattern=r'https?://.*(youtube\.com|youtu\.be).*'))
+async def youtube_handler(event):
+    if event.sender_id != ADMIN_ID: return
+    if not SETTINGS['is_active']: return
 
-# --- دریافت فایل ---
+    msg = await event.reply("📥 **لینک یوتیوب تشخیص داده شد!**\n⏳ در حال دانلود ویدیو روی سرور...")
+
+    try:
+        # تنظیمات دانلودر
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best', # بهترین کیفیت MP4
+            'outtmpl': f'downloads/%(id)s.%(ext)s', # مسیر ذخیره موقت
+            'quiet': True,
+            'no_warnings': True,
+            # محدودیت حجم برای جلوگیری از هنگ کردن سرور رایگان (مثلا 100 مگ)
+            'max_filesize': 100 * 1024 * 1024 
+        }
+
+        # دانلود ویدیو
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(event.text, download=True)
+            file_path = ydl.prepare_filename(info)
+
+        await msg.edit("📤 دانلود تمام شد. در حال آپلود به تلگرام...")
+
+        # آپلود به تلگرام (به عنوان فایل)
+        # نکته: وقتی فایل آپلود شود، هندلر handle_file خودکار آن را می‌گیرد و لینک می‌سازد!
+        await client.send_file(
+            ADMIN_ID, 
+            file_path, 
+            caption=f"🎥 **{info.get('title', 'YouTube Video')}**\n🔗 Source: {event.text}",
+            supports_streaming=True
+        )
+        
+        await msg.delete() # حذف پیام "در حال دانلود"
+        
+        # پاک کردن فایل از روی سرور برای خالی شدن فضا
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+    except Exception as e:
+        await msg.edit(f"❌ خطا در دانلود: {str(e)}")
+        # پاکسازی در صورت خطا
+        files = glob.glob('downloads/*')
+        for f in files: os.remove(f)
+
+# --- هندلر دریافت فایل و ساخت لینک ---
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
     if event.sender_id != ADMIN_ID: return
+    # اگر لینک یوتیوب بود، نادیده بگیر (چون هندلر بالایی انجامش میده)
+    if event.text and ("youtube.com" in event.text or "youtu.be" in event.text): return
     if event.text and event.text.startswith('/'): return
     if not event.media: return
 
     try:
+        # ساخت لینک برای فایل (چه فایل ارسالی شما، چه فایل دانلود شده از یوتیوب)
         msg = await event.reply("🔄 ...")
         unique_id = str(uuid.uuid4())[:8]
         expire_time = time.time() + SETTINGS['expire_time']
@@ -111,44 +152,28 @@ async def handle_file(event):
             txt += f"\n\n▶️ **پخش آنلاین:**\n`{stream_url}`"
             
         await msg.edit(txt, buttons=[[Button.inline("❌ حذف", data=f"del_{unique_id}")]])
-        print(f"✅ Link created for {unique_id}")
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
 
 # --- هندلر دکمه‌ها ---
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
     data = event.data.decode('utf-8')
-    
     if data == "toggle_active":
         SETTINGS['is_active'] = not SETTINGS['is_active']
-        # به‌روزرسانی متن دکمه‌ها
-        buttons = [
-            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌ غیرفعال'}", data="toggle_active")],
-            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("⏱ 2 ساعت", data="set_time_7200")],
-            [Button.inline("🗑 حذف همه لینک‌ها", data="clear_all")]
-        ]
-        await event.edit(
-            "👋 **سلام قربان!**\n\n"
-            "🟢 ربات آماده دریافت فایل است.\n"
-            "⚙️ **پنل دسترسی سریع:**", 
-            buttons=buttons
-        )
-    
+        await event.answer("تغییر کرد")
     elif data == "clear_all":
         links_db.clear()
-        await event.answer("🗑 حافظه پاک شد!", alert=True)
-        
+        await event.answer("پاک شد")
     elif data.startswith("set_time_"):
         SETTINGS['expire_time'] = int(data.split("_")[2])
-        await event.answer(f"⏱ زمان روی {SETTINGS['expire_time']//3600} ساعت تنظیم شد.", alert=True)
-        
+        await event.answer("زمان تنظیم شد")
     elif data.startswith("del_"):
         uid = data.split("_")[1]
         if uid in links_db: del links_db[uid]
-        await event.edit("🗑 حذف شد.")
+        await event.edit("حذف شد.")
 
 # --- استریم ---
 async def stream_handler(unique_id, disposition):
@@ -158,7 +183,6 @@ async def stream_handler(unique_id, disposition):
     msg = data['msg']
     file_size = data['size']
     range_header = request.headers.get('Range')
-    
     start, end = 0, file_size - 1
     status = 200
 
@@ -191,4 +215,7 @@ async def st(unique_id): return await stream_handler(unique_id, 'inline')
 async def home(): return "Bot is Alive!"
 
 if __name__ == '__main__':
+    # ساخت پوشه دانلود برای یوتیوب
+    if not os.path.exists('downloads'):
+        os.makedirs('downloads')
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
