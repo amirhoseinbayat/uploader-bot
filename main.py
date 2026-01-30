@@ -3,10 +3,8 @@ import time
 import uuid
 import re
 import asyncio
-import glob
-import certifi
 import aiohttp
-import random
+import certifi
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
@@ -20,35 +18,27 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 
+# 🔑 کلید جدید را در Render با نام RAPID_API_KEY ذخیره کنید
+RAPID_API_KEY = os.environ.get("RAPID_API_KEY") 
+
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
-# --- لیست سرورهای زنده (تست شده) ---
-# سرورهای arms و oxno زنده هستند ولی نیاز به ssl=False دارند
-COBALT_INSTANCES = [
-    "https://api.cobalt.tools",          # اصلی (پایدارترین)
-    "https://cobalt.arms.da.ru",         # روسیه (عالی)
-    "https://api.oxno.de",               # آلمان
-    "https://cobalt.rudart.cn",          # چین (جدید)
-    "https://cobalt.q114514.top",        # جایگزین
-]
-
-# --- 🍃 اتصال به دیتابیس ---
+# --- 🍃 اتصال دیتابیس ---
 mongo_client = None
 links_col = None
 
 if MONGO_URL:
     try:
-        # اتصال به دیتابیس با نادیده گرفتن SSL
         mongo_client = AsyncIOMotorClient(MONGO_URL, tls=True, tlsAllowInvalidCertificates=True)
         db = mongo_client['uploader_bot']
         links_col = db['links']
     except Exception as e:
         print(f"❌ DB Error: {e}")
 
-# --- 🤖 اتصال به تلگرام ---
+# --- 🤖 اتصال تلگرام ---
 if SESSION_STRING:
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 else:
@@ -69,7 +59,7 @@ async def startup():
         try:
             await mongo_client.admin.command('ping')
             print("✅ MongoDB Connected!")
-        except: print("⚠️ MongoDB Connection Failed")
+        except: print("⚠️ MongoDB Failed")
 
 # --- 🔗 تابع ساخت لینک ---
 async def generate_link_for_message(message, reply_to_msg):
@@ -127,9 +117,9 @@ async def start_handler(event):
         [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
         [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی DB", data="clear_all")]
     ]
-    await event.reply("👋 **ربات آماده است!**\nلینک یوتیوب/اینستاگرام یا فایل بفرستید.", buttons=buttons)
+    await event.reply("👋 **ربات (نسخه RapidAPI) آماده است!**\nلینک بفرستید.", buttons=buttons)
 
-# --- 🎥 دانلودر هوشمند (FIXED SSL) ---
+# --- 🎥 دانلودر RapidAPI (نسخه yt-api) ---
 @client.on(events.NewMessage(pattern=r'(?s).*https?://.*'))
 async def url_handler(event):
     if event.sender_id != ADMIN_ID or not SETTINGS['is_active']: return
@@ -139,61 +129,74 @@ async def url_handler(event):
     if not found_links: return
     target_url = found_links[0]
 
-    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok', 'twitter', 'x.com', 'soundcloud', 'twitch']
+    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok']
     if not any(d in target_url for d in valid_domains): return
 
-    msg = await event.reply(f"🚀 **اتصال به سرورهای دانلود...**\n`{target_url}`")
+    if not RAPID_API_KEY:
+        await event.reply("❌ **خطا:** کلید `RAPID_API_KEY` در Render تنظیم نشده است!")
+        return
+
+    msg = await event.reply(f"🚀 **دریافت از RapidAPI...**\n`{target_url}`")
     
     download_url = None
-    working_server = ""
-    server_list = COBALT_INSTANCES.copy()
-    random.shuffle(server_list)
+    
+    # تنظیمات برای yt-api.p.rapidapi.com
+    # این سرویس معمولاً از اندپوینت /dl استفاده می‌کند
+    api_url = "https://yt-api.p.rapidapi.com/dl"
+    
+    # استخراج ID ویدیو از لینک
+    video_id = target_url
+    if "v=" in target_url:
+        video_id = target_url.split("v=")[1].split("&")[0]
+    elif "youtu.be/" in target_url:
+        video_id = target_url.split("youtu.be/")[1].split("?")[0]
+    elif "shorts/" in target_url:
+        video_id = target_url.split("shorts/")[1].split("?")[0]
 
-    # اتصال بدون بررسی SSL (برای حل مشکل سرورهای رایگان)
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-        for api_base in server_list:
-            try:
-                headers = {
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                }
-                payload = {
-                    "url": target_url,
-                    "vQuality": "720",
-                    "filenamePattern": "basic",
-                    "isAudioOnly": False
-                }
-                
-                async with session.post(f"{api_base}/api/json", json=payload, headers=headers, timeout=8) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        status = data.get('status')
-                        
-                        if status in ['stream', 'redirect']:
-                            download_url = data.get('url')
-                        elif status == 'picker':
-                            download_url = data['picker'][0]['url']
-                            
-                        if download_url:
-                            working_server = api_base
-                            print(f"✅ Connected to: {api_base}")
-                            break
-                    else:
-                        print(f"⚠️ {api_base} returned {resp.status}")
+    querystring = {"id": video_id}
+    
+    headers = {
+        "x-rapidapi-key": RAPID_API_KEY,
+        "x-rapidapi-host": "yt-api.p.rapidapi.com"
+    }
 
-            except Exception as e:
-                print(f"⚠️ {api_base} Error: {e}")
-                continue
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, headers=headers, params=querystring) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # تلاش برای پیدا کردن لینک در پاسخ JSON
+                    # ساختار پاسخ ممکن است بسته به نسخه API متفاوت باشد
+                    if 'url' in data:
+                        download_url = data['url']
+                    elif 'link' in data:
+                        download_url = data['link']
+                    elif 'formats' in data and len(data['formats']) > 0:
+                        download_url = data['formats'][0]['url']
+                    elif 'adaptiveFormats' in data and len(data['adaptiveFormats']) > 0:
+                        download_url = data['adaptiveFormats'][0]['url']
+                    elif 'links' in data and len(data['links']) > 0:
+                         # برخی سرویس‌ها لیست می‌دهند
+                         download_url = data['links']['mp4']['auto']['link'] if 'mp4' in data['links'] else None
+                         
+                else:
+                    err_text = await resp.text()
+                    print(f"RapidAPI Error ({resp.status}): {err_text}")
+                    # اگر اندپوینت /dl کار نکرد، یک بار دیگر با /video تلاش می‌کنیم (بعضی سرویس‌ها اینطوری هستند)
+                    if resp.status == 404:
+                         async with session.get("https://yt-api.p.rapidapi.com/video", headers=headers, params=querystring) as resp2:
+                             if resp2.status == 200:
+                                 data2 = await resp2.json()
+                                 if 'url' in data2: download_url = data2['url']
 
         if not download_url:
-            await msg.edit("❌ سرورها پاسخ ندادند. (مشکل SSL یا شلوغی شبکه)\nلطفاً لینک دیگری را تست کنید.")
+            await msg.edit("❌ لینک دانلود دریافت نشد.\n(ممکن است سهمیه API تمام شده باشد یا ویدیو محدود باشد)")
             return
 
-        await msg.edit(f"📥 دانلود از: {working_server.split('//')[1]}\nدر حال انتقال...")
+        await msg.edit(f"📥 لینک مستقیم شد!\nدر حال دانلود به سرور...")
 
-        try:
-            # دانلود فایل نهایی (باز هم بدون SSL برای اطمینان)
+        # دانلود فایل نهایی
+        async with aiohttp.ClientSession() as session:
             async with session.get(download_url) as resp:
                 if resp.status == 200:
                     file_path = f"downloads/{uuid.uuid4()}.mp4"
@@ -204,18 +207,19 @@ async def url_handler(event):
                     uploaded = await client.send_file(
                         ADMIN_ID, 
                         file_path, 
-                        caption=f"🎥 لینک: {target_url}\n⚡️ سرور: {working_server}", 
+                        caption=f"🎥 لینک اصلی: {target_url}\n✨ سرویس: yt-api", 
                         supports_streaming=True
                     )
                     
                     if os.path.exists(file_path): os.remove(file_path)
                     await generate_link_for_message(uploaded, msg)
                 else:
-                    await msg.edit("❌ لینک گرفته شد ولی فایل دانلود نشد.")
-        except Exception as e:
-            await msg.edit(f"❌ خطای نهایی: {str(e)}")
-            if os.path.exists('downloads'):
-                for f in glob.glob('downloads/*'): os.remove(f)
+                    await msg.edit("❌ لینک دانلود معتبر بود اما فایل دانلود نشد.")
+
+    except Exception as e:
+        await msg.edit(f"❌ خطا: {str(e)}")
+        if os.path.exists('downloads'):
+             for f in glob.glob('downloads/*'): os.remove(f)
 
 # --- 📁 هندلر فایل ---
 @client.on(events.NewMessage(incoming=True))
@@ -229,7 +233,7 @@ async def handle_file(event):
     msg = await event.reply("🍃 در حال پردازش فایل...")
     await generate_link_for_message(event.message, msg)
 
-# --- 🔘 دکمه‌ها و استریم ---
+# --- 🔘 دکمه‌ها ---
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
