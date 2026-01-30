@@ -127,3 +127,7 @@ async def download_file(unique_id):
 if __name__ == '__main__':
     PORT = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=PORT)
+
+@app.route('/')
+async def home():
+    return "Bot is running and happy! 🤖"
