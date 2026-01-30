@@ -7,6 +7,7 @@ import aiohttp
 import certifi
 import glob
 import json
+from urllib.parse import quote
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
@@ -75,6 +76,16 @@ def format_size(bytes_size):
         return f"{mb:.1f}MB"
     except: return "نامشخص"
 
+def extract_video_id(url):
+    video_id = None
+    if "youtu.be" in url:
+        video_id = url.split("/")[-1].split("?")[0]
+    elif "v=" in url:
+        video_id = url.split("v=")[1].split("&")[0]
+    elif "shorts" in url:
+        video_id = url.split("shorts/")[1].split("?")[0]
+    return video_id
+
 async def generate_link_for_message(message, reply_to_msg):
     if links_col is None:
         await reply_to_msg.edit("❌ دیتابیس قطع است.")
@@ -122,72 +133,127 @@ async def generate_link_for_message(message, reply_to_msg):
     except Exception as e:
         await reply_to_msg.edit(f"❌ خطا: {e}")
 
-# --- 🧠 دریافت فرمت‌ها (با اولویت SnapVideo) ---
+# --- 🧠 موتورهای جدید جستجوی فرمت (Multi-Engine) ---
 
 async def get_formats(target_url):
     formats_list = []
+    video_id = extract_video_id(target_url)
     
     async with aiohttp.ClientSession() as session:
-        # 1. تلاش با Snap Video (کیفیت‌های بهتر)
-        try:
-            url = "https://snap-video3.p.rapidapi.com/download"
-            payload = {"url": target_url}
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "x-rapidapi-host": "snap-video3.p.rapidapi.com",
-                "x-rapidapi-key": RAPID_API_KEY
-            }
-            # این API گاهی نیاز به POST Form Data دارد
-            async with session.post(url, data=payload, headers=headers, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    # بررسی ساختار پاسخ
-                    if isinstance(data, list):
-                        for item in data:
-                            if 'video' in item.get('quality', '').lower() or 'mp4' in item.get('format', ''):
+        
+        # 1️⃣ Engine 1: Youtube Video Stream Download (Snippet 4)
+        if video_id:
+            try:
+                print(f"🔄 Trying Engine 1 (Stream DL) for ID: {video_id}...")
+                url = f"https://youtube-video-stream-download.p.rapidapi.com/api/v1/Youtube/getAllDetails/{video_id}"
+                headers = {
+                    "x-rapidapi-key": RAPID_API_KEY,
+                    "x-rapidapi-host": "youtube-video-stream-download.p.rapidapi.com"
+                }
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # جستجو در ساختار پاسخ (معمولاً formats یا streamingData)
+                        streams = data.get('formats', []) + data.get('adaptiveFormats', [])
+                        if not streams and 'streamingData' in data:
+                             streams = data['streamingData'].get('formats', [])
+                        
+                        for fmt in streams:
+                            # فیلتر کردن ویدیوهای mp4 صدادار
+                            if 'mp4' in fmt.get('mimeType', '') and fmt.get('audioQuality'):
                                 formats_list.append({
-                                    "quality": item.get('quality', 'Video'),
-                                    "size": format_size(item.get('size')), 
-                                    "url": item.get('url'),
-                                    "source": "Snap"
+                                    "quality": fmt.get('qualityLabel', 'Unknown'),
+                                    "size": format_size(fmt.get('contentLength')),
+                                    "url": fmt.get('url'),
+                                    "source": "StreamDL"
                                 })
-                    elif isinstance(data, dict):
-                         # گاهی ساختار متفاوت است
-                         if 'link' in data:
-                             formats_list.append({"quality": "Best", "size": "?", "url": data['link'], "source": "Snap"})
-        except Exception as e:
-            print(f"SnapAPI Error: {e}")
+            except Exception as e:
+                print(f"⚠️ Engine 1 Failed: {e}")
 
-        # 2. اگر اولی خالی بود، تلاش با Youtube Quick DL
+        # 2️⃣ Engine 2: Youtube Quick Video Downloader (Snippet 2)
         if not formats_list:
             try:
+                print("🔄 Trying Engine 2 (Quick DL)...")
                 url = "https://youtube-quick-video-downloader.p.rapidapi.com/api/youtube/links"
                 headers = {
                     "Content-Type": "application/json",
                     "x-rapidapi-host": "youtube-quick-video-downloader.p.rapidapi.com",
                     "x-rapidapi-key": RAPID_API_KEY
                 }
-                async with session.post(url, json={"url": target_url}, headers=headers, timeout=15) as resp:
+                async with session.post(url, json={"url": target_url}, headers=headers, timeout=12) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if isinstance(data, list): # این API لیست برمیگرداند
-                            for item in data:
-                                if item.get('extension') == 'mp4':
-                                    label = item.get('quality', {}).get('qualityLabel') if isinstance(item.get('quality'), dict) else item.get('quality')
-                                    formats_list.append({
-                                        "quality": label or "MP4",
-                                        "size": format_size(item.get('contentLength')),
-                                        "url": item.get('url'),
-                                        "source": "QuickDL"
-                                    })
+                        # این API گاهی لیست برمیگرداند
+                        items = data if isinstance(data, list) else data.get('all_formats', [])
+                        for item in items:
+                            if item.get('extension') == 'mp4' or 'mp4' in item.get('format', ''):
+                                formats_list.append({
+                                    "quality": item.get('quality', 'Video'),
+                                    "size": format_size(item.get('contentLength')),
+                                    "url": item.get('url'),
+                                    "source": "QuickDL"
+                                })
             except Exception as e:
-                print(f"QuickDL Error: {e}")
+                print(f"⚠️ Engine 2 Failed: {e}")
+
+        # 3️⃣ Engine 3: Youtube Video MP3 Downloader (Snippet 5)
+        if not formats_list:
+            try:
+                print("🔄 Trying Engine 3 (MP3/Video DL)...")
+                encoded_url = quote(target_url)
+                url = f"https://youtube-video-mp3-downloader-api.p.rapidapi.com/download?url={encoded_url}"
+                headers = {
+                    "x-rapidapi-key": RAPID_API_KEY,
+                    "x-rapidapi-host": "youtube-video-mp3-downloader-api.p.rapidapi.com"
+                }
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if 'url' in data:
+                             formats_list.append({
+                                 "quality": data.get('quality', 'HD'),
+                                 "size": "Unknown",
+                                 "url": data['url'],
+                                 "source": "MP3DL"
+                             })
+                        elif 'link' in data:
+                             formats_list.append({
+                                 "quality": "HD", "size": "?", "url": data['link'], "source": "MP3DL"
+                             })
+            except Exception as e:
+                print(f"⚠️ Engine 3 Failed: {e}")
+
+        # 4️⃣ Engine 4: All Video Downloader 3 (Snippet 3)
+        if not formats_list:
+            try:
+                print("🔄 Trying Engine 4 (All Video)...")
+                url = "https://all-video-downloader3.p.rapidapi.com/all"
+                payload = {"url": target_url}
+                headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "x-rapidapi-host": "all-video-downloader3.p.rapidapi.com",
+                    "x-rapidapi-key": RAPID_API_KEY
+                }
+                async with session.post(url, data=payload, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # جستجو برای لینک در کلیدهای مختلف
+                        found_link = data.get('url') or data.get('link') or data.get('download_link')
+                        if found_link:
+                            formats_list.append({
+                                "quality": "Best",
+                                "size": "Unknown",
+                                "url": found_link,
+                                "source": "AllDL"
+                            })
+            except Exception as e:
+                print(f"⚠️ Engine 4 Failed: {e}")
 
     # حذف تکراری‌ها و مرتب‌سازی
     unique_formats = []
     seen_urls = set()
     for f in formats_list:
-        if f['url'] not in seen_urls:
+        if f['url'] and f['url'] not in seen_urls:
             seen_urls.add(f['url'])
             unique_formats.append(f)
             
@@ -201,7 +267,7 @@ async def start_handler(event):
         [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
         [Button.inline("🗑 پاکسازی DB", data="clear_all")]
     ]
-    await event.reply("👋 **ربات آماده است!**\nلینک بفرستید.", buttons=buttons)
+    await event.reply("👋 **ربات آماده است!**\nلینک بفرستید (پشتیبانی از 4 موتور RapidAPI).", buttons=buttons)
 
 # --- 🎥 دریافت لینک و نمایش منو ---
 @client.on(events.NewMessage(pattern=r'(?s).*https?://.*'))
@@ -213,25 +279,24 @@ async def url_handler(event):
     if not found_links: return
     target_url = found_links[0]
 
-    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok']
+    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok', 'soundcloud']
     if not any(d in target_url for d in valid_domains): return
 
-    msg = await event.reply(f"🔍 **در حال آنالیز لینک...**\n`{target_url}`")
+    msg = await event.reply(f"🔍 **در حال استخراج کیفیت‌ها (موتور ۴ مرحله‌ای)...**\n`{target_url}`")
     
     formats = await get_formats(target_url)
     
     if not formats:
-        await msg.edit("❌ کیفیت مناسبی یافت نشد (شاید محدودیت API).")
+        await msg.edit("❌ تمام ۴ موتور جستجو شکست خوردند. لینک را بررسی کنید.")
         return
 
-    # ذخیره در حافظه موقت
     request_id = str(uuid.uuid4())[:8]
     PENDING_QUALITY_SELECTION[request_id] = formats
     
     buttons = []
-    # فقط 4 کیفیت اول را نمایش بده (برای شلوغ نشدن)
-    for index, fmt in enumerate(formats[:5]):
-        text = f"🎬 {fmt['quality']} | {fmt['size']}"
+    # نمایش حداکثر 6 کیفیت
+    for index, fmt in enumerate(formats[:6]):
+        text = f"🎬 {fmt['quality']} | {fmt['size']} ({fmt['source']})"
         buttons.append([Button.inline(text, data=f"dl_{request_id}_{index}")])
     
     buttons.append([Button.inline("❌ لغو", data=f"cancel_{request_id}")])
@@ -256,22 +321,21 @@ async def callback_handler(event):
             selected = PENDING_QUALITY_SELECTION[req_id][idx]
             download_url = selected['url']
             
-            await event.edit(f"📥 **در حال دانلود {selected['quality']}...**\nسایز: {selected['size']}")
+            await event.edit(f"📥 **دانلود {selected['quality']} از {selected['source']}...**\nحجم: {selected['size']}")
             del PENDING_QUALITY_SELECTION[req_id]
             
-            # --- 🚀 بخش مهم: دانلود با جعل هویت مرورگر ---
+            # --- 🚀 دانلود با جعل هویت (حیاتی) ---
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": "https://www.youtube.com/"
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(download_url, headers=headers, allow_redirects=True, timeout=60) as resp:
+                async with session.get(download_url, headers=headers, allow_redirects=True, timeout=120) as resp:
                     
                     if resp.status == 200:
                         content_type = resp.headers.get('Content-Type', '').lower()
                         
-                        # بررسی اینکه آیا فایل واقعا ویدیو است
                         if 'video' in content_type or 'application/octet-stream' in content_type:
                             file_path = f"downloads/{uuid.uuid4()}.mp4"
                             with open(file_path, 'wb') as f:
@@ -281,16 +345,15 @@ async def callback_handler(event):
                             uploaded = await client.send_file(
                                 ADMIN_ID, 
                                 file_path, 
-                                caption=f"✅ {selected['quality']}", 
+                                caption=f"✅ {selected['quality']} ({selected['source']})", 
                                 supports_streaming=True
                             )
                             if os.path.exists(file_path): os.remove(file_path)
                             await generate_link_for_message(uploaded, event.message)
                         else:
-                            # اگر باز هم متن داد، متن ارور را بخوانیم
+                            # اگر باز هم فایل خراب بود
                             text_error = await resp.text()
-                            print(f"DL Error Body: {text_error}")
-                            await event.edit(f"❌ لینک مستقیم نیست.\nType: {content_type}\nمحتوا: {text_error[:100]}")
+                            await event.edit(f"❌ فایل خراب است.\nType: {content_type}")
                     else:
                         await event.edit(f"❌ خطای دانلود: {resp.status}")
 
