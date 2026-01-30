@@ -23,15 +23,18 @@ BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
 # --- اتصال به دیتابیس ---
+mongo_client = None
+links_col = None
+
 if not MONGO_URL:
     print("❌ خطا: MONGO_URL تنظیم نشده است!")
-    # برای جلوگیری از کرش کردن در صورت نبودن لینک، یک کلاینت خالی میسازیم ولی ارور میدهیم
-    mongo_client = None
-    links_col = None
 else:
-    mongo_client = AsyncIOMotorClient(MONGO_URL)
-    db = mongo_client['uploader_bot']
-    links_col = db['links']
+    try:
+        mongo_client = AsyncIOMotorClient(MONGO_URL)
+        db = mongo_client['uploader_bot']
+        links_col = db['links']
+    except Exception as e:
+        print(f"❌ خطا در اتصال به مونگو: {e}")
 
 # --- اتصال به تلگرام ---
 if SESSION_STRING:
@@ -50,14 +53,16 @@ async def startup():
         try: await client.connect()
         except: await client.start(bot_token=BOT_TOKEN)
     
-    if mongo_client:
+    # اصلاح چک کردن وضعیت دیتابیس
+    if mongo_client is not None:
         print(f"✅ Bot Connected! MongoDB Status: Connected 🍃")
     else:
         print(f"⚠️ Bot Connected but MongoDB URL is MISSING!")
 
 # --- تابع کمکی: ساخت لینک ---
 async def generate_link_for_message(message, reply_to_msg):
-    if not links_col:
+    # اصلاح باگ NotImplementedError (چک کردن دقیق با None)
+    if links_col is None:
         await reply_to_msg.edit("❌ خطای دیتابیس: MONGO_URL تنظیم نشده است.")
         return
 
@@ -117,7 +122,7 @@ async def start_handler(event):
             [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
             [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 فرمت دیتابیس", data="clear_all")]
         ]
-        status_msg = "سیستم به دیتابیس MongoDB متصل است 🍃" if mongo_client else "❌ دیتابیس وصل نیست!"
+        status_msg = "سیستم به دیتابیس MongoDB متصل است 🍃" if mongo_client is not None else "❌ دیتابیس وصل نیست!"
         await event.reply(f"👋 **سلام قربان!**\n{status_msg}\nفایل بفرستید.", buttons=buttons)
 
 # --- هندلر دریافت فایل ---
@@ -142,13 +147,17 @@ async def callback_handler(event):
         await event.answer("انجام شد")
         
     elif data == "clear_all":
-        if links_col:
+        # اصلاح چک کردن دیتابیس
+        if links_col is not None:
             await links_col.delete_many({})
             await event.answer("دیتابیس کامل پاکسازی شد!", alert=True)
+        else:
+            await event.answer("دیتابیس وصل نیست!")
         
     elif data.startswith("del_"):
         uid = data.split("_")[1]
-        if links_col:
+        # اصلاح چک کردن دیتابیس
+        if links_col is not None:
             await links_col.delete_one({'unique_id': uid})
             await event.edit("🗑 از دیتابیس حذف شد.")
             
@@ -158,7 +167,9 @@ async def callback_handler(event):
 
 # --- استریم و دانلود (خواندن از MongoDB) ---
 async def stream_handler(unique_id, disposition):
-    if not links_col: return "Database Error", 500
+    # اصلاح چک کردن دیتابیس
+    if links_col is None:
+        return "Database Error: Not Connected", 500
 
     # جستجو در دیتابیس به جای رم
     data = await links_col.find_one({'unique_id': unique_id})
