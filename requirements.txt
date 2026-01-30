@@ -2,5 +2,3 @@ quart
 telethon
 motor
 dnspython
-certifi
-aiohttp
