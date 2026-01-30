@@ -2,27 +2,29 @@ import os
 import time
 import uuid
 import asyncio
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, Button
 from quart import Quart, request, Response
 
 # --- دریافت اطلاعات از Render ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = 98097025  # آیدی عددی شما ثابت است
+ADMIN_ID = 98097025
 
-# اگر آدرس سایت هنوز مشخص نیست، پیش‌فرض لوکال‌هاست باشد
+# تنظیم آدرس سایت
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 
 # --- راه‌اندازی ---
 client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 app = Quart(__name__)
 
-# حافظه موقت لینک‌ها
 links_db = {}
 
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
+    # لاگ کردن پیام برای دیباگ
+    print(f"New message from {event.sender_id}: {event.text or 'Media'}")
+
     if event.sender_id != ADMIN_ID:
         return
 
@@ -30,14 +32,19 @@ async def handle_file(event):
         await event.reply("❌ لطفاً فقط فایل ارسال کنید.")
         return
 
-    # منوی انتخاب زمان
+    # منوی انتخاب زمان (اصلاح شده)
     buttons = [
-        [events.NewMessage.Button.inline("⏱ 10 دقیقه", data=f"time_600_{event.id}"),
-         events.NewMessage.Button.inline("⏱ 30 دقیقه", data=f"time_1800_{event.id}")],
-        [events.NewMessage.Button.inline("⏱ 60 دقیقه", data=f"time_3600_{event.id}"),
-         events.NewMessage.Button.inline("⏱ 2 ساعت", data=f"time_7200_{event.id}")]
+        [Button.inline("⏱ 10 دقیقه", data=f"time_600_{event.id}"),
+         Button.inline("⏱ 30 دقیقه", data=f"time_1800_{event.id}")],
+        [Button.inline("⏱ 60 دقیقه", data=f"time_3600_{event.id}"),
+         Button.inline("⏱ 2 ساعت", data=f"time_7200_{event.id}")]
     ]
-    await event.reply("⏳ زمان انقضای لینک را انتخاب کنید:", buttons=buttons)
+    
+    try:
+        await event.reply("⏳ زمان انقضای لینک را انتخاب کنید:", buttons=buttons)
+    except Exception as e:
+        print(f"Error sending buttons: {e}")
+        await event.reply(f"Error: {str(e)}")
 
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
@@ -62,10 +69,10 @@ async def callback_handler(event):
                 'filename': original_msg.file.name or f"file_{unique_id}"
             }
             
-            # اصلاح آدرس لینک (حذف اسلش اضافه در صورت وجود)
             final_url = BASE_URL.rstrip('/') + f"/dl/{unique_id}"
             
-            del_btn = [events.NewMessage.Button.inline("❌ حذف لینک", data=f"del_{unique_id}")]
+            # اصلاح دکمه حذف
+            del_btn = [Button.inline("❌ حذف لینک", data=f"del_{unique_id}")]
             
             await event.edit(
                 f"✅ **لینک مستقیم آماده است!**\n\n"
@@ -75,6 +82,7 @@ async def callback_handler(event):
                 buttons=del_btn
             )
         except Exception as e:
+            print(f"Error in callback: {e}")
             await event.reply(f"Error: {str(e)}")
 
     elif data.startswith("del_"):
@@ -100,7 +108,6 @@ async def download_file(unique_id):
     msg = data['msg']
     file_name = data['filename']
 
-    # هدرهای لازم برای دانلود منیجرها
     headers = {
         'Content-Type': 'application/octet-stream',
         'Content-Disposition': f'attachment; filename="{file_name}"',
@@ -108,13 +115,11 @@ async def download_file(unique_id):
     }
 
     async def file_generator():
-        # دانلود و استریم همزمان (بدون ذخیره در دیسک)
         async for chunk in client.download_file(msg.media, file=bytes):
             yield chunk
 
     return Response(file_generator(), headers=headers)
 
-# اجرای سرور روی پورتی که Render می‌دهد
 PORT = int(os.environ.get("PORT", 8000))
 loop = asyncio.get_event_loop()
 app.run(loop=loop, host="0.0.0.0", port=PORT)
