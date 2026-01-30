@@ -6,6 +6,7 @@ import asyncio
 import glob
 import certifi
 import aiohttp
+import random
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
@@ -19,19 +20,25 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 
-# ⚠️ آیدی عددی ادمین
+# آیدی ادمین (ست شده برای شما)
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
-# --- لیست سرورهای Cobalt (آپدیت شده و قوی‌تر) ---
+# --- لیست طلایی سرورهای Cobalt (آپدیت 2025) ---
+# ترکیبی از سرورهای اصلی و کامیونیتی برای تضمین دانلود
 COBALT_INSTANCES = [
-    "https://api.cobalt.tools",          # اصلی
-    "https://cobalt.kwiatekmiki.pl",     # بک‌آپ ۱
-    "https://cobalt.ducks.party",        # بک‌آپ ۲
-    "https://cobalt.154.gq",             # بک‌آپ ۳
-    "https://cobalt.xy24.eu.org",        # بک‌آپ ۴
+    "https://api.cobalt.tools",          # سرور اصلی (گاهی شلوغ)
+    "https://cobalt.kwiatekmiki.pl",     # بسیار پایدار
+    "https://cobalt.arms.da.ru",         # سرور روسیه (عالی برای دور زدن تحریم)
+    "https://api.oxno.de",               # سرور آلمان
+    "https://cobalt.154.gq",             # سرور عمومی قوی
+    "https://cobalt.xy24.eu.org",        # سرور اروپا
+    "https://cobalt.slpy.one",           # سرور جایگزین
+    "https://cobalt.jimmyjo.eu",         # سرور جایگزین 2
+    "https://cobalt.nao.lgbt",           # سرور آمریکا
+    "https://cobalt.furtidev.me",        # سرور آسیا
 ]
 
 # --- 🍃 اتصال به دیتابیس ---
@@ -125,37 +132,48 @@ async def start_handler(event):
         [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
         [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی DB", data="clear_all")]
     ]
-    await event.reply("👋 **ربات آماده است!**\nلینک یا فایل بفرستید.", buttons=buttons)
+    await event.reply("👋 **ربات آماده است!**\nلینک یوتیوب/اینستاگرام یا فایل بفرستید.", buttons=buttons)
 
-# --- 🎥 دانلودر هوشمند (Cobalt) ---
-# تغییر مهم: پترن Regex طوری شد که لینک وسط متن را هم پیدا کند
+# --- 🎥 دانلودر هوشمند (Mega Server List) ---
 @client.on(events.NewMessage(pattern=r'(?s).*https?://.*'))
 async def url_handler(event):
     if event.sender_id != ADMIN_ID or not SETTINGS['is_active']: return
-    # اگر پیام فایل دارد ولی وب پیج نیست (یعنی فایل واقعی است)، نادیده بگیر
     if event.media and not isinstance(event.media, MessageMediaWebPage): return
 
-    # استخراج لینک از متن پیام
+    # استخراج لینک
     found_links = re.findall(r'https?://[^\s]+', event.text)
     if not found_links: return
-    target_url = found_links[0] # اولین لینک پیدا شده
+    target_url = found_links[0]
 
-    # فقط لینک‌های معتبر (یوتیوب، اینستا، تیک‌تاک و...)
-    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok', 'twitter', 'x.com']
+    valid_domains = ['youtube', 'youtu.be', 'instagram', 'tiktok', 'twitter', 'x.com', 'soundcloud', 'twitch']
     if not any(d in target_url for d in valid_domains): return
 
-    msg = await event.reply(f"🔎 **لینک یافت شد:**\n`{target_url}`\n⏳ در حال تست سرورهای دانلود...")
+    msg = await event.reply(f"🚀 **درحال جستجوی سرور خلوت...**\n`{target_url}`")
     
     download_url = None
+    working_server = ""
     
+    # شافل کردن لیست سرورها برای توزیع بار (شانسی انتخاب میکنه که همزمان روی یک سرور فشار نیاد)
+    server_list = COBALT_INSTANCES.copy()
+    random.shuffle(server_list)
+
     async with aiohttp.ClientSession() as session:
-        for api_base in COBALT_INSTANCES:
+        for api_base in server_list:
             try:
-                headers = {"Accept": "application/json", "Content-Type": "application/json"}
-                # تنظیمات ساده‌تر برای شانس موفقیت بیشتر
-                payload = {"url": target_url} 
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }
+                payload = {
+                    "url": target_url,
+                    "vQuality": "720",
+                    "filenamePattern": "basic",
+                    "isAudioOnly": False
+                }
                 
-                async with session.post(f"{api_base}/api/json", json=payload, headers=headers, timeout=20) as resp:
+                # تایم‌اوت کوتاه (۵ ثانیه) برای اینکه اگر سروری کند بود سریع ردش کنه
+                async with session.post(f"{api_base}/api/json", json=payload, headers=headers, timeout=6) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         status = data.get('status')
@@ -166,16 +184,18 @@ async def url_handler(event):
                             download_url = data['picker'][0]['url']
                             
                         if download_url:
-                            print(f"✅ Download success from: {api_base}")
-                            break # موفق شدیم!
-            except:
-                continue # سرور خراب بود، بعدی رو تست کن
+                            working_server = api_base
+                            print(f"✅ Connected to: {api_base}")
+                            break
+            except Exception as e:
+                print(f"⚠️ Server {api_base} failed: {e}")
+                continue
 
     if not download_url:
-        await msg.edit("❌ تمام سرورهای کمکی شلوغ هستند. لطفاً ۱ دقیقه دیگر تلاش کنید.")
+        await msg.edit("❌ تمام سرورهای کمکی در حال حاضر شلوغ یا فیلتر هستند.\nلطفاً ۵ دقیقه دیگر تلاش کنید یا لینک دیگری بفرستید.")
         return
 
-    await msg.edit("📥 لینک مستقیم شد! در حال انتقال به تلگرام...")
+    await msg.edit(f"📥 سرور پیدا شد ({working_server.split('//')[1]})\nدر حال دانلود...")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -185,28 +205,27 @@ async def url_handler(event):
                     with open(file_path, 'wb') as f:
                         f.write(await resp.read())
                     
-                    await msg.edit("📤 در حال آپلود...")
+                    await msg.edit("📤 در حال آپلود به تلگرام...")
                     uploaded = await client.send_file(
                         ADMIN_ID, 
                         file_path, 
-                        caption=f"🎥 لینک اصلی: {target_url}", 
+                        caption=f"🎥 لینک اصلی: {target_url}\n⚡️ سرور: {working_server}", 
                         supports_streaming=True
                     )
                     
                     if os.path.exists(file_path): os.remove(file_path)
                     await generate_link_for_message(uploaded, msg)
                 else:
-                    await msg.edit("❌ خطا در دانلود فایل نهایی.")
+                    await msg.edit("❌ لینک دانلود ساخته شد اما دانلود فایل شکست خورد.")
     except Exception as e:
-        await msg.edit(f"❌ خطا: {str(e)}")
+        await msg.edit(f"❌ خطای نهایی: {str(e)}")
         if os.path.exists('downloads'):
             for f in glob.glob('downloads/*'): os.remove(f)
 
-# --- 📁 هندلر فایل (بقیه فایل‌ها) ---
+# --- 📁 هندلر فایل ---
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
     if event.sender_id != ADMIN_ID: return
-    # اگر پیام لینک داشت، هندلر قبلی انجامش میده، پس اینجا کاری نکن
     if re.search(r'https?://', event.text): return 
     if event.text and event.text.startswith('/'): return
     if isinstance(event.media, MessageMediaWebPage): return
@@ -215,7 +234,7 @@ async def handle_file(event):
     msg = await event.reply("🍃 در حال پردازش فایل...")
     await generate_link_for_message(event.message, msg)
 
-# --- 🔘 دکمه‌ها و استریم (بدون تغییر) ---
+# --- 🔘 دکمه‌ها و استریم ---
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
