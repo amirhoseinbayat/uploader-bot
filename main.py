@@ -13,8 +13,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# ⚠️⚠️⚠️ آیدی عددی خودتان را اینجا جایگزین کنید ⚠️⚠️⚠️
-# اگر این عدد با آیدی تلگرام شما یکی نباشد، ربات جواب نمیدهد
+# ⚠️ آیدی عددی خودتان (حتما چک کنید درست باشد)
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
@@ -41,23 +40,31 @@ async def startup():
             await client.start(bot_token=BOT_TOKEN)
     print(f"✅ Bot Connected! Listening for Admin ID: {ADMIN_ID}")
 
-# --- عیب‌یاب (Logger) ---
-# این بخش هر پیامی بیاید را در لاگ مینویسد تا بفهمیم مشکل کجاست
-@client.on(events.NewMessage(incoming=True))
-async def logger(event):
-    if event.sender_id == ADMIN_ID:
-        print(f"📩 پیام از ادمین دریافت شد: {event.text or 'File'}")
-    else:
-        print(f"⚠️ پیام از غریبه (ID: {event.sender_id}) نادیده گرفته شد.")
-
-# --- دستور استارت ---
+# --- دستور استارت (همراه با دکمه‌های مدیریت) ---
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if event.sender_id == ADMIN_ID:
-        await event.reply("👋 سلام! ربات آماده است. فایل بفرست.")
+        # دکمه‌های پنل مدیریت همینجا تعریف می‌شوند
+        buttons = [
+            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌ غیرفعال'}", data="toggle_active")],
+            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("⏱ 2 ساعت", data="set_time_7200")],
+            [Button.inline("🗑 حذف همه لینک‌ها", data="clear_all")]
+        ]
+        await event.reply(
+            "👋 **سلام قربان!**\n\n"
+            "🟢 ربات آماده دریافت فایل است.\n"
+            "⚙️ **پنل دسترسی سریع:**", 
+            buttons=buttons
+        )
     else:
-        # اگر آیدی اشتباه باشد این پیام می‌آید
-        await event.reply(f"⛔️ شما ادمین نیستید.\nآیدی شما: `{event.sender_id}`\nآیدی تنظیم شده در ربات: `{ADMIN_ID}`")
+        await event.reply("⛔️ شما دسترسی ندارید.")
+
+# --- دستور پنل (اختیاری) ---
+@client.on(events.NewMessage(pattern='/admin'))
+async def admin_panel(event):
+    if event.sender_id == ADMIN_ID:
+        # فراخوانی همان دکمه‌ها
+        await start_handler(event)
 
 # --- دریافت فایل ---
 @client.on(events.NewMessage(incoming=True))
@@ -67,7 +74,7 @@ async def handle_file(event):
     if not event.media: return
 
     try:
-        msg = await event.reply("🔄 در حال پردازش...")
+        msg = await event.reply("🔄 ...")
         unique_id = str(uuid.uuid4())[:8]
         expire_time = time.time() + SETTINGS['expire_time']
         
@@ -114,7 +121,31 @@ async def handle_file(event):
 async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
     data = event.data.decode('utf-8')
-    if data.startswith("del_"):
+    
+    if data == "toggle_active":
+        SETTINGS['is_active'] = not SETTINGS['is_active']
+        # به‌روزرسانی متن دکمه‌ها
+        buttons = [
+            [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌ غیرفعال'}", data="toggle_active")],
+            [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("⏱ 2 ساعت", data="set_time_7200")],
+            [Button.inline("🗑 حذف همه لینک‌ها", data="clear_all")]
+        ]
+        await event.edit(
+            "👋 **سلام قربان!**\n\n"
+            "🟢 ربات آماده دریافت فایل است.\n"
+            "⚙️ **پنل دسترسی سریع:**", 
+            buttons=buttons
+        )
+    
+    elif data == "clear_all":
+        links_db.clear()
+        await event.answer("🗑 حافظه پاک شد!", alert=True)
+        
+    elif data.startswith("set_time_"):
+        SETTINGS['expire_time'] = int(data.split("_")[2])
+        await event.answer(f"⏱ زمان روی {SETTINGS['expire_time']//3600} ساعت تنظیم شد.", alert=True)
+        
+    elif data.startswith("del_"):
         uid = data.split("_")[1]
         if uid in links_db: del links_db[uid]
         await event.edit("🗑 حذف شد.")
@@ -147,7 +178,6 @@ async def stream_handler(unique_id, disposition):
     }
 
     async def file_generator():
-        # کاهش حجم بافر برای جلوگیری از قفل شدن ربات هنگام استریم
         async for chunk in client.iter_download(msg.media, offset=start, request_size=128*1024):
             yield chunk
 
