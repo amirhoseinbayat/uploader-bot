@@ -1,13 +1,17 @@
 import os
 import time
 import uuid
-import re  # <--- این خط جا افتاده بود و باعث ارور میشد
+import re  # رفع ارور قبلی
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
 from quart import Quart, request, Response
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# برای اجرای صحیح روی سرور
+import hypercorn.asyncio
+from hypercorn.config import Config
 
 # --- ⚙️ تنظیمات ---
 API_ID = int(os.environ.get("API_ID"))
@@ -156,7 +160,6 @@ async def callback_handler(event):
 async def stream_handler(unique_id, disposition):
     if links_col is None: return "DB Error", 500
     
-    # اطمینان از اتصال تلگرام
     if not client.is_connected():
         try: await client.connect()
         except: pass
@@ -180,8 +183,8 @@ async def stream_handler(unique_id, disposition):
     start, end = 0, file_size - 1
     status = 200
 
-    # اینجا از re استفاده می‌شود که قبلاً باعث ارور می‌شد
     if range_header:
+        # استفاده صحیح از کتابخانه re
         match = re.search(r'bytes=(\d+)-(\d*)', range_header)
         if match:
             start = int(match.group(1))
@@ -208,3 +211,9 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
 async def home(): return "Streaming Bot Active 🚀"
+
+# --- ⚡️ اجرای Hypercorn از داخل کد (رفع مشکل exited early) ---
+if __name__ == '__main__':
+    config = Config()
+    config.bind = [f"0.0.0.0:{int(os.environ.get('PORT', 8000))}"]
+    asyncio.run(hypercorn.asyncio.serve(app, config))
