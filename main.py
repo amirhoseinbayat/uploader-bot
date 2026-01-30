@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import re
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
@@ -14,10 +15,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
-
-# آیدی عددی شما (برای مدیریت ربات)
 ADMIN_ID = 98097025
-
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
@@ -41,21 +39,25 @@ else:
 
 app = Quart(__name__)
 
+# --- شروع به کار ---
 @app.before_serving
 async def startup():
     print("🤖 Bot Starting...")
-    if not SESSION_STRING: await client.start(bot_token=BOT_TOKEN)
-    else:
-        try: await client.connect()
-        except: await client.start(bot_token=BOT_TOKEN)
+    # اتصال تلگرام
+    if not client.is_connected():
+        if not SESSION_STRING: await client.start(bot_token=BOT_TOKEN)
+        else:
+            try: await client.connect()
+            except: await client.start(bot_token=BOT_TOKEN)
     
+    # اتصال دیتابیس
     if mongo_client:
         try:
             await mongo_client.admin.command('ping')
             print("✅ MongoDB Connected!")
         except: print("⚠️ MongoDB Failed")
 
-# --- 🔗 تابع تبدیل فایل به لینک ---
+# --- 🔗 تابع ساخت لینک ---
 async def generate_link_for_message(message, reply_to_msg):
     if links_col is None:
         await reply_to_msg.edit("❌ دیتابیس قطع است.")
@@ -111,7 +113,7 @@ async def start_handler(event):
         [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
         [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی DB", data="clear_all")]
     ]
-    await event.reply("👋 **ربات تبدیل فایل به لینک مستقیم آماده است!**\n\nفایل تلگرامی بفرستید تا لینک دانلود ابدی تحویل بگیرید.", buttons=buttons)
+    await event.reply("👋 **ربات استریم ویدیو آماده است!**\nفایل بفرستید.", buttons=buttons)
 
 # --- 📁 هندلر دریافت فایل ---
 @client.on(events.NewMessage(incoming=True))
@@ -122,13 +124,13 @@ async def handle_file(event):
     if not event.media: return
 
     if not SETTINGS['is_active']:
-        await event.reply("❌ ربات فعلاً غیرفعال است.")
+        await event.reply("❌ ربات غیرفعال است.")
         return
 
-    msg = await event.reply("🍃 در حال ذخیره در دیتابیس...")
+    msg = await event.reply("🍃 در حال پردازش...")
     await generate_link_for_message(event.message, msg)
 
-# --- 🔘 دکمه‌های مدیریتی ---
+# --- 🔘 دکمه‌ها ---
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
@@ -140,32 +142,38 @@ async def callback_handler(event):
     elif data == "clear_all":
         if links_col is not None:
             await links_col.delete_many({})
-            await event.answer("دیتابیس کامل پاک شد!", alert=True)
+            await event.answer("پاک شد", alert=True)
     elif data.startswith("del_"):
         uid = data.split("_")[1]
         if links_col is not None:
             await links_col.delete_one({'unique_id': uid})
-            await event.edit("🗑 لینک حذف شد.")
+            await event.edit("🗑 حذف شد.")
     elif data.startswith("set_time_"):
         SETTINGS['expire_time'] = int(data.split("_")[2])
-        await event.answer("زمان انقضا تنظیم شد")
+        await event.answer("تنظیم شد")
 
-# --- 🚀 سرور دانلود و استریم ---
+# --- 🚀 هندلر استریم حرفه‌ای ---
 async def stream_handler(unique_id, disposition):
     if links_col is None: return "DB Error", 500
+    
+    # اطمینان از اتصال تلگرام قبل از دانلود
+    if not client.is_connected():
+        try: await client.connect()
+        except: pass
+
     data = await links_col.find_one({'unique_id': unique_id})
-    if not data: return "❌ Link Not Found (Deleted)", 404
+    if not data: return "Link Not Found", 404
     
     if time.time() > data['expire']:
         await links_col.delete_one({'unique_id': unique_id})
-        return "⏳ Link Expired", 403
+        return "Link Expired", 403
 
     await links_col.update_one({'unique_id': unique_id}, {'$inc': {'views': 1}})
 
     try:
         msg = await client.get_messages(data['chat_id'], ids=data['msg_id'])
-        if not msg or not msg.media: return "Original File Removed from Telegram", 404
-    except: return "Telegram Error", 500
+        if not msg or not msg.media: return "File Removed from Telegram", 404
+    except: return "Telegram API Error", 500
 
     file_size = data['size']
     range_header = request.headers.get('Range')
@@ -179,16 +187,18 @@ async def stream_handler(unique_id, disposition):
             if match.group(2): end = int(match.group(2))
             status = 206
 
+    # تنظیم هدرهای صحیح برای ویدیو پلیرها
     headers = {
         'Content-Type': data['mime'],
         'Content-Disposition': f'{disposition}; filename="{data["filename"]}"',
         'Accept-Ranges': 'bytes',
         'Content-Range': f'bytes {start}-{end}/{file_size}',
-        'Content-Length': str(end - start + 1)
+        'Content-Length': str(end - start + 1),
     }
 
     async def file_generator():
-        async for chunk in client.iter_download(msg.media, offset=start, request_size=128*1024):
+        # دانلود تکه به تکه از تلگرام و ارسال به کاربر
+        async for chunk in client.iter_download(msg.media, offset=start, request_size=512*1024):
             yield chunk
 
     return Response(file_generator(), status=status, headers=headers)
@@ -198,7 +208,6 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 @app.route('/stream/<unique_id>')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
-async def home(): return "Uploader Bot Active 🍃"
+async def home(): return "Streaming Bot Active 🚀"
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
+# نکته: app.run حذف شد چون Hypercorn این را هندل می‌کند
