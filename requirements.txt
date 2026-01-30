@@ -1,3 +1,5 @@
 Telethon
 Quart
 hypercorn
+motor
+dnspython
