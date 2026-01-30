@@ -3,6 +3,8 @@ import time
 import uuid
 import re
 import asyncio
+# اضافه کردن کتابخانه امنیتی
+import certifi 
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
@@ -16,13 +18,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 
-# ⚠️ آیدی عددی خودتان را اینجا وارد کنید
+# ⚠️ آیدی عددی خودتان را وارد کنید
 ADMIN_ID = 98097025  
 
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 SETTINGS = {'expire_time': 3600, 'is_active': True}
 
-# --- اتصال به دیتابیس ---
+# --- اتصال به دیتابیس (با فیکس SSL) ---
 mongo_client = None
 links_col = None
 
@@ -30,7 +32,8 @@ if not MONGO_URL:
     print("❌ خطا: MONGO_URL تنظیم نشده است!")
 else:
     try:
-        mongo_client = AsyncIOMotorClient(MONGO_URL)
+        # 🟢 فیکس اصلی: استفاده از certifi برای حل مشکل SSL Handshake
+        mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
         db = mongo_client['uploader_bot']
         links_col = db['links']
     except Exception as e:
@@ -53,17 +56,20 @@ async def startup():
         try: await client.connect()
         except: await client.start(bot_token=BOT_TOKEN)
     
-    # اصلاح چک کردن وضعیت دیتابیس
     if mongo_client is not None:
-        print(f"✅ Bot Connected! MongoDB Status: Connected 🍃")
+        try:
+            # تست اتصال واقعی برای اطمینان از رفع ارور SSL
+            await mongo_client.admin.command('ping')
+            print(f"✅ Bot Connected! MongoDB SSL Handshake: Successful 🍃")
+        except Exception as e:
+            print(f"❌ MongoDB Connection Failed: {e}")
     else:
         print(f"⚠️ Bot Connected but MongoDB URL is MISSING!")
 
 # --- تابع کمکی: ساخت لینک ---
 async def generate_link_for_message(message, reply_to_msg):
-    # اصلاح باگ NotImplementedError (چک کردن دقیق با None)
     if links_col is None:
-        await reply_to_msg.edit("❌ خطای دیتابیس: MONGO_URL تنظیم نشده است.")
+        await reply_to_msg.edit("❌ خطای دیتابیس: اتصال برقرار نشد.")
         return
 
     try:
@@ -89,7 +95,6 @@ async def generate_link_for_message(message, reply_to_msg):
         if 'video' in mime_type or 'audio' in mime_type:
             can_stream = True
 
-        # ذخیره اطلاعات در MongoDB
         link_data = {
             'unique_id': unique_id,
             'chat_id': message.chat_id,
@@ -104,7 +109,7 @@ async def generate_link_for_message(message, reply_to_msg):
         dl_url = f"{BASE_URL}/dl/{unique_id}"
         stream_url = f"{BASE_URL}/stream/{unique_id}"
         
-        txt = (f"✅ **لینک ابدی شد!** (ذخیره در دیتابیس)\n📄 `{file_name}`\n📦 حجم: {file_size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
+        txt = (f"✅ **لینک ابدی شد!** (MongoDB)\n📄 `{file_name}`\n📦 حجم: {file_size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
         if can_stream:
             txt += f"\n\n▶️ **پخش آنلاین:**\n`{stream_url}`"
             
@@ -147,7 +152,6 @@ async def callback_handler(event):
         await event.answer("انجام شد")
         
     elif data == "clear_all":
-        # اصلاح چک کردن دیتابیس
         if links_col is not None:
             await links_col.delete_many({})
             await event.answer("دیتابیس کامل پاکسازی شد!", alert=True)
@@ -156,7 +160,6 @@ async def callback_handler(event):
         
     elif data.startswith("del_"):
         uid = data.split("_")[1]
-        # اصلاح چک کردن دیتابیس
         if links_col is not None:
             await links_col.delete_one({'unique_id': uid})
             await event.edit("🗑 از دیتابیس حذف شد.")
@@ -165,13 +168,11 @@ async def callback_handler(event):
         SETTINGS['expire_time'] = int(data.split("_")[2])
         await event.answer("زمان تنظیم شد")
 
-# --- استریم و دانلود (خواندن از MongoDB) ---
+# --- استریم و دانلود ---
 async def stream_handler(unique_id, disposition):
-    # اصلاح چک کردن دیتابیس
     if links_col is None:
         return "Database Error: Not Connected", 500
 
-    # جستجو در دیتابیس به جای رم
     data = await links_col.find_one({'unique_id': unique_id})
     
     if not data:
