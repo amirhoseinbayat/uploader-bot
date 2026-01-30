@@ -1,5 +1,4 @@
-Telethon
-Quart
-hypercorn
+quart
+telethon
 motor
 dnspython
