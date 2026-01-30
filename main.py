@@ -25,12 +25,13 @@ SETTINGS = {'expire_time': 3600, 'is_active': True}
 # --- اتصال به دیتابیس ---
 if not MONGO_URL:
     print("❌ خطا: MONGO_URL تنظیم نشده است!")
-    exit(1)
-
-# کلاینت دیتابیس
-mongo_client = AsyncIOMotorClient(MONGO_URL)
-db = mongo_client['uploader_bot']
-links_col = db['links']  # ذخیره لینک‌ها در دیتابیس
+    # برای جلوگیری از کرش کردن در صورت نبودن لینک، یک کلاینت خالی میسازیم ولی ارور میدهیم
+    mongo_client = None
+    links_col = None
+else:
+    mongo_client = AsyncIOMotorClient(MONGO_URL)
+    db = mongo_client['uploader_bot']
+    links_col = db['links']
 
 # --- اتصال به تلگرام ---
 if SESSION_STRING:
@@ -48,10 +49,18 @@ async def startup():
     else:
         try: await client.connect()
         except: await client.start(bot_token=BOT_TOKEN)
-    print(f"✅ Bot Connected! MongoDB Status: Connected 🍃")
+    
+    if mongo_client:
+        print(f"✅ Bot Connected! MongoDB Status: Connected 🍃")
+    else:
+        print(f"⚠️ Bot Connected but MongoDB URL is MISSING!")
 
 # --- تابع کمکی: ساخت لینک ---
 async def generate_link_for_message(message, reply_to_msg):
+    if not links_col:
+        await reply_to_msg.edit("❌ خطای دیتابیس: MONGO_URL تنظیم نشده است.")
+        return
+
     try:
         unique_id = str(uuid.uuid4())[:8]
         expire_time = time.time() + SETTINGS['expire_time']
@@ -108,7 +117,8 @@ async def start_handler(event):
             [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
             [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 فرمت دیتابیس", data="clear_all")]
         ]
-        await event.reply("👋 **سلام قربان!**\nسیستم به دیتابیس MongoDB متصل است 🍃.\nفایل بفرستید.", buttons=buttons)
+        status_msg = "سیستم به دیتابیس MongoDB متصل است 🍃" if mongo_client else "❌ دیتابیس وصل نیست!"
+        await event.reply(f"👋 **سلام قربان!**\n{status_msg}\nفایل بفرستید.", buttons=buttons)
 
 # --- هندلر دریافت فایل ---
 @client.on(events.NewMessage(incoming=True))
@@ -132,13 +142,15 @@ async def callback_handler(event):
         await event.answer("انجام شد")
         
     elif data == "clear_all":
-        await links_col.delete_many({})
-        await event.answer("دیتابیس کامل پاکسازی شد!", alert=True)
+        if links_col:
+            await links_col.delete_many({})
+            await event.answer("دیتابیس کامل پاکسازی شد!", alert=True)
         
     elif data.startswith("del_"):
         uid = data.split("_")[1]
-        await links_col.delete_one({'unique_id': uid})
-        await event.edit("🗑 از دیتابیس حذف شد.")
+        if links_col:
+            await links_col.delete_one({'unique_id': uid})
+            await event.edit("🗑 از دیتابیس حذف شد.")
             
     elif data.startswith("set_time_"):
         SETTINGS['expire_time'] = int(data.split("_")[2])
@@ -146,6 +158,8 @@ async def callback_handler(event):
 
 # --- استریم و دانلود (خواندن از MongoDB) ---
 async def stream_handler(unique_id, disposition):
+    if not links_col: return "Database Error", 500
+
     # جستجو در دیتابیس به جای رم
     data = await links_col.find_one({'unique_id': unique_id})
     
