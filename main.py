@@ -1,15 +1,13 @@
 import os
 import time
 import uuid
-import re  # ✅ اضافه شد برای رفع ارور NameError
+import re
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaWebPage
 from quart import Quart, request, Response
 from motor.motor_asyncio import AsyncIOMotorClient
-
-# برای اجرای صحیح روی سرور
 import hypercorn.asyncio
 from hypercorn.config import Config
 
@@ -21,7 +19,10 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 MONGO_URL = os.environ.get("MONGO_URL")
 ADMIN_ID = 98097025
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
-SETTINGS = {'expire_time': 3600, 'is_active': True}
+
+# حافظه موقت برای نگه داشتن فایل تا زمان انتخاب تایمر
+# ساختار: {request_id: {msg_object, reply_msg_object}}
+PENDING_FILES = {}
 
 # --- 🍃 اتصال دیتابیس ---
 mongo_client = None
@@ -59,35 +60,44 @@ async def startup():
             print("✅ MongoDB Connected!")
         except: print("⚠️ MongoDB Failed")
 
-# --- 🔗 تابع ساخت لینک ---
-async def generate_link_for_message(message, reply_to_msg):
+# --- 💾 تابع نهایی ذخیره در دیتابیس (بعد از انتخاب زمان) ---
+async def save_file_to_db(req_id, minutes):
+    if req_id not in PENDING_FILES: return
+    
+    user_msg = PENDING_FILES[req_id]['msg']
+    bot_reply = PENDING_FILES[req_id]['reply']
+    
+    # حذف از حافظه موقت
+    del PENDING_FILES[req_id]
+
     if links_col is None:
-        await reply_to_msg.edit("❌ دیتابیس قطع است.")
+        await bot_reply.edit("❌ دیتابیس قطع است.")
         return
 
     try:
         unique_id = str(uuid.uuid4())[:8]
-        expire_time = time.time() + SETTINGS['expire_time']
+        # محاسبه زمان انقضا بر اساس انتخاب کاربر
+        expire_time = time.time() + (minutes * 60)
         
         file_name = "file"
         mime_type = "application/octet-stream"
         file_size = 0
         
-        if hasattr(message, 'file') and message.file:
-            if message.file.name: file_name = message.file.name
+        if hasattr(user_msg, 'file') and user_msg.file:
+            if user_msg.file.name: file_name = user_msg.file.name
             else:
-                ext = message.file.ext or ""
+                ext = user_msg.file.ext or ""
                 file_name = f"downloaded_file{ext}"
-            mime_type = message.file.mime_type
-            file_size = message.file.size
+            mime_type = user_msg.file.mime_type
+            file_size = user_msg.file.size
         else: return
 
         can_stream = 'video' in mime_type or 'audio' in mime_type
 
         link_data = {
             'unique_id': unique_id,
-            'chat_id': message.chat_id,
-            'msg_id': message.id,
+            'chat_id': user_msg.chat_id,
+            'msg_id': user_msg.id,
             'expire': expire_time,
             'filename': file_name,
             'mime': mime_type,
@@ -99,25 +109,35 @@ async def generate_link_for_message(message, reply_to_msg):
         dl_url = f"{BASE_URL}/dl/{unique_id}"
         stream_url = f"{BASE_URL}/stream/{unique_id}"
         
-        txt = (f"✅ **لینک مستقیم ساخته شد!**\n📄 `{file_name}`\n📦 حجم: {file_size // 1024 // 1024} MB\n\n📥 **دانلود:**\n`{dl_url}`")
+        # فرمت زمان برای نمایش
+        hours = minutes // 60
+        mins = minutes % 60
+        time_str = f"{hours} ساعت" if hours > 0 else f"{mins} دقیقه"
+        if mins > 0 and hours > 0: time_str += f" و {mins} دقیقه"
+
+        txt = (f"✅ **لینک مستقیم ساخته شد!**\n"
+               f"⏳ اعتبار: {time_str}\n"
+               f"📄 `{file_name}`\n"
+               f"📦 حجم: {file_size // 1024 // 1024} MB\n\n"
+               f"📥 **دانلود:**\n`{dl_url}`")
+        
         if can_stream: txt += f"\n\n▶️ **پخش آنلاین:**\n`{stream_url}`"
             
-        await reply_to_msg.edit(txt, buttons=[[Button.inline("❌ حذف لینک", data=f"del_{unique_id}")]])
+        await bot_reply.edit(txt, buttons=[[Button.inline("❌ حذف لینک", data=f"del_{unique_id}")]])
         
     except Exception as e:
-        await reply_to_msg.edit(f"❌ خطا: {e}")
+        await bot_reply.edit(f"❌ خطا: {e}")
 
 # --- 👋 استارت ---
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if event.sender_id != ADMIN_ID: return
     buttons = [
-        [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
-        [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی DB", data="clear_all")]
+        [Button.inline("🗑 پاکسازی کل دیتابیس", data="clear_all")]
     ]
-    await event.reply("👋 **ربات استریم ویدیو (نسخه فیکس شده) آماده است!**\nفایل بفرستید.", buttons=buttons)
+    await event.reply("👋 **ربات آپلودر پیشرفته آماده است!**\nفایل بفرستید -> زمان را انتخاب کنید -> لینک بگیرید.", buttons=buttons)
 
-# --- 📁 هندلر دریافت فایل ---
+# --- 📁 هندلر دریافت فایل (نمایش منوی زمان) ---
 @client.on(events.NewMessage(incoming=True))
 async def handle_file(event):
     if event.sender_id != ADMIN_ID: return
@@ -125,12 +145,20 @@ async def handle_file(event):
     if isinstance(event.media, MessageMediaWebPage): return
     if not event.media: return
 
-    if not SETTINGS['is_active']:
-        await event.reply("❌ ربات غیرفعال است.")
-        return
+    msg = await event.reply("⏳ در حال بررسی فایل...")
+    
+    # ساخت شناسه موقت
+    req_id = str(uuid.uuid4())[:8]
+    PENDING_FILES[req_id] = {'msg': event.message, 'reply': msg}
 
-    msg = await event.reply("🍃 در حال پردازش...")
-    await generate_link_for_message(event.message, msg)
+    # دکمه‌های انتخاب زمان
+    buttons = [
+        [Button.inline("⏱ 30 دقیقه", data=f"time_{req_id}_30"), Button.inline("⏱ 1 ساعت", data=f"time_{req_id}_60")],
+        [Button.inline("⏱ 3 ساعت", data=f"time_{req_id}_180"), Button.inline("⏱ 12 ساعت", data=f"time_{req_id}_720")],
+        [Button.inline("⏱ 24 ساعت", data=f"time_{req_id}_1440"), Button.inline("❌ لغو", data=f"cancel_{req_id}")]
+    ]
+
+    await msg.edit("🕒 **این لینک تا چه زمانی فعال باشد؟**\nلطفاً یک گزینه را انتخاب کنید:", buttons=buttons)
 
 # --- 🔘 دکمه‌ها ---
 @client.on(events.CallbackQuery)
@@ -138,23 +166,39 @@ async def callback_handler(event):
     if event.sender_id != ADMIN_ID: return
     data = event.data.decode('utf-8')
     
-    if data == "toggle_active":
-        SETTINGS['is_active'] = not SETTINGS['is_active']
-        await event.answer("انجام شد")
-    elif data == "clear_all":
-        if links_col is not None:
-            await links_col.delete_many({})
-            await event.answer("پاک شد", alert=True)
+    # انتخاب زمان
+    if data.startswith("time_"):
+        parts = data.split("_")
+        req_id = parts[1]
+        minutes = int(parts[2])
+        
+        if req_id in PENDING_FILES:
+            await event.answer(f"تنظیم شد: {minutes} دقیقه")
+            await save_file_to_db(req_id, minutes)
+        else:
+            await event.answer("⚠️ این درخواست منقضی شده است.", alert=True)
+            await event.delete()
+
+    # لغو عملیات
+    elif data.startswith("cancel_"):
+        req_id = data.split("_")[1]
+        if req_id in PENDING_FILES: del PENDING_FILES[req_id]
+        await event.delete()
+
+    # حذف لینک تکی
     elif data.startswith("del_"):
         uid = data.split("_")[1]
         if links_col is not None:
             await links_col.delete_one({'unique_id': uid})
-            await event.edit("🗑 حذف شد.")
-    elif data.startswith("set_time_"):
-        SETTINGS['expire_time'] = int(data.split("_")[2])
-        await event.answer("تنظیم شد")
+            await event.edit("🗑 لینک با موفقیت حذف شد.")
 
-# --- 🚀 هندلر استریم دقیق (Byte-Perfect) ---
+    # پاکسازی کل دیتابیس
+    elif data == "clear_all":
+        if links_col is not None:
+            await links_col.delete_many({})
+            await event.answer("دیتابیس کامل خالی شد!", alert=True)
+
+# --- 🚀 هندلر استریم توربو (افزایش سرعت) ---
 async def stream_handler(unique_id, disposition):
     if links_col is None: return "DB Error", 500
     
@@ -178,23 +222,17 @@ async def stream_handler(unique_id, disposition):
 
     file_size = data['size']
     range_header = request.headers.get('Range')
-    
-    # مقادیر پیش‌فرض (کل فایل)
     start, end = 0, file_size - 1
     status = 200
 
-    # پردازش درخواست Range (جلو/عقب بردن ویدیو)
     if range_header:
         match = re.search(r'bytes=(\d+)-(\d*)', range_header)
         if match:
             start = int(match.group(1))
-            if match.group(2): 
-                end = int(match.group(2))
-            status = 206 # Partial Content
+            if match.group(2): end = int(match.group(2))
+            status = 206
 
-    # محاسبه طول دقیق محتوایی که باید فرستاده شود
     content_length = end - start + 1
-
     headers = {
         'Content-Type': data['mime'],
         'Content-Disposition': f'{disposition}; filename="{data["filename"]}"',
@@ -203,22 +241,18 @@ async def stream_handler(unique_id, disposition):
         'Content-Length': str(content_length),
     }
 
-    # ژنراتور دقیق که بایت‌های اضافی نمی‌فرستد
     async def file_generator():
         bytes_remaining = content_length
-        # دانلود تکه به تکه از تلگرام (128 کیلوبایت برای شروع سریع)
-        async for chunk in client.iter_download(msg.media, offset=start, request_size=128*1024):
-            if bytes_remaining <= 0:
-                break
-                
+        # 🚀 افزایش حجم چانک به ۱ مگابایت برای سرعت بالا
+        CHUNK_SIZE = 1024 * 1024 
+        
+        async for chunk in client.iter_download(msg.media, offset=start, request_size=CHUNK_SIZE):
+            if bytes_remaining <= 0: break
             chunk_len = len(chunk)
-            
             if bytes_remaining >= chunk_len:
-                # اگر کل این تکه لازم است، بفرست
                 yield chunk
                 bytes_remaining -= chunk_len
             else:
-                # اگر به انتهای درخواست رسیدیم، فقط بخش مورد نیاز را بفرست و تمام
                 yield chunk[:bytes_remaining]
                 bytes_remaining = 0
                 break
@@ -230,9 +264,8 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 @app.route('/stream/<unique_id>')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
-async def home(): return "Stream Bot Active 🚀"
+async def home(): return "Turbo Stream Bot Active 🚀"
 
-# --- ⚡️ اجرای Hypercorn ---
 if __name__ == '__main__':
     config = Config()
     config.bind = [f"0.0.0.0:{int(os.environ.get('PORT', 8000))}"]
