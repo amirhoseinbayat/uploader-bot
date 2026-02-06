@@ -1,7 +1,7 @@
 import os
 import time
 import uuid
-import re  # رفع ارور قبلی
+import re  # ✅ اضافه شد برای رفع ارور NameError
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
@@ -47,14 +47,12 @@ app = Quart(__name__)
 @app.before_serving
 async def startup():
     print("🤖 Bot Starting...")
-    # اتصال تلگرام
     if not client.is_connected():
         if not SESSION_STRING: await client.start(bot_token=BOT_TOKEN)
         else:
             try: await client.connect()
             except: await client.start(bot_token=BOT_TOKEN)
     
-    # اتصال دیتابیس
     if mongo_client:
         try:
             await mongo_client.admin.command('ping')
@@ -117,7 +115,7 @@ async def start_handler(event):
         [Button.inline(f"وضعیت: {'✅ فعال' if SETTINGS['is_active'] else '❌'}", data="toggle_active")],
         [Button.inline("⏱ 1 ساعت", data="set_time_3600"), Button.inline("🗑 پاکسازی DB", data="clear_all")]
     ]
-    await event.reply("👋 **ربات استریم ویدیو آماده است!**\nفایل بفرستید.", buttons=buttons)
+    await event.reply("👋 **ربات استریم ویدیو (نسخه فیکس شده) آماده است!**\nفایل بفرستید.", buttons=buttons)
 
 # --- 📁 هندلر دریافت فایل ---
 @client.on(events.NewMessage(incoming=True))
@@ -156,7 +154,7 @@ async def callback_handler(event):
         SETTINGS['expire_time'] = int(data.split("_")[2])
         await event.answer("تنظیم شد")
 
-# --- 🚀 هندلر استریم حرفه‌ای ---
+# --- 🚀 هندلر استریم دقیق (Byte-Perfect) ---
 async def stream_handler(unique_id, disposition):
     if links_col is None: return "DB Error", 500
     
@@ -180,28 +178,50 @@ async def stream_handler(unique_id, disposition):
 
     file_size = data['size']
     range_header = request.headers.get('Range')
+    
+    # مقادیر پیش‌فرض (کل فایل)
     start, end = 0, file_size - 1
     status = 200
 
+    # پردازش درخواست Range (جلو/عقب بردن ویدیو)
     if range_header:
-        # استفاده صحیح از کتابخانه re
         match = re.search(r'bytes=(\d+)-(\d*)', range_header)
         if match:
             start = int(match.group(1))
-            if match.group(2): end = int(match.group(2))
-            status = 206
+            if match.group(2): 
+                end = int(match.group(2))
+            status = 206 # Partial Content
+
+    # محاسبه طول دقیق محتوایی که باید فرستاده شود
+    content_length = end - start + 1
 
     headers = {
         'Content-Type': data['mime'],
         'Content-Disposition': f'{disposition}; filename="{data["filename"]}"',
         'Accept-Ranges': 'bytes',
         'Content-Range': f'bytes {start}-{end}/{file_size}',
-        'Content-Length': str(end - start + 1),
+        'Content-Length': str(content_length),
     }
 
+    # ژنراتور دقیق که بایت‌های اضافی نمی‌فرستد
     async def file_generator():
-        async for chunk in client.iter_download(msg.media, offset=start, request_size=512*1024):
-            yield chunk
+        bytes_remaining = content_length
+        # دانلود تکه به تکه از تلگرام (128 کیلوبایت برای شروع سریع)
+        async for chunk in client.iter_download(msg.media, offset=start, request_size=128*1024):
+            if bytes_remaining <= 0:
+                break
+                
+            chunk_len = len(chunk)
+            
+            if bytes_remaining >= chunk_len:
+                # اگر کل این تکه لازم است، بفرست
+                yield chunk
+                bytes_remaining -= chunk_len
+            else:
+                # اگر به انتهای درخواست رسیدیم، فقط بخش مورد نیاز را بفرست و تمام
+                yield chunk[:bytes_remaining]
+                bytes_remaining = 0
+                break
 
     return Response(file_generator(), status=status, headers=headers)
 
@@ -210,9 +230,9 @@ async def dl(unique_id): return await stream_handler(unique_id, 'attachment')
 @app.route('/stream/<unique_id>')
 async def st(unique_id): return await stream_handler(unique_id, 'inline')
 @app.route('/')
-async def home(): return "Streaming Bot Active 🚀"
+async def home(): return "Stream Bot Active 🚀"
 
-# --- ⚡️ اجرای Hypercorn از داخل کد (رفع مشکل exited early) ---
+# --- ⚡️ اجرای Hypercorn ---
 if __name__ == '__main__':
     config = Config()
     config.bind = [f"0.0.0.0:{int(os.environ.get('PORT', 8000))}"]
